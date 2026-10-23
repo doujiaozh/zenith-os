@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# This working tree is an unpacked NASM distribution that hosts the ZenithOS
+# project at its root.  Track only the ZenithOS sources and tooling; the NASM
+# distribution files stay local.
+# ---------------------------------------------------------------------------
+*
+!.gitignore
+!.gitattributes
+!README.md
+!ROADMAP.md
+!LICENSE
+!LICENSE.md
+!boot.asm
+!build.js
+!package.json
+!package-lock.json
+!src/
+!src/**
+!tools/
+!tools/**
+!docs/
+!docs/**
+!screenshots/
+!screenshots/**
+!.github/
+!.github/**
+
+# Build products / caches are never committed.
+build/
+node_modules/
+tools/vendor/
+*.bin
+*.img
+*.o
+*.elf
+*.log
+*.tmp
+nasm.exe
+ndisasm.exe

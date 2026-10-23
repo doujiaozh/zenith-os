@@ -1,0 +1,7 @@
+* text=auto
+*.asm text eol=lf linguist-language=Assembly
+*.js text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.bin binary
+*.img binary
