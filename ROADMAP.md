@@ -97,9 +97,12 @@ timeline
 HAL 的 port/cpu、字符串库、完整构建/链接/打包管线（GNU `ld` + `objcopy`，镜像在 v86 无头
 串口/帧捕获下可回放）。IDT/PIC/ISR 与 PS/2 键盘中断已经打开（IRQ1→键盘、IRQ0→100 Hz 节拍），
 之上运行**交互式 Shell**（提示符/回显/Backspace/Enter + `help`/`clear`/`reboot`/`3d` 命令，
-`3d` 进入 Q8.8 定点旋转的 3D 神经网格演示、ESC 返回 Shell）。`[已编译·未接线]`：PMM/分页/堆、
-rtc/device、`lib/{fmt,log,panic}`。`[目标架构]`（未创建文件）：UI 的
-theme/desktop/terminal/roles/scene3d 与三角色工作区交互。启用分页与 UI 是 v6.0 自身的剩余工作。
+`3d` 进入 Q8.8 定点旋转的 3D 神经网格演示、ESC 返回 Shell）。**内存管理已在启动路径开启**：
+`mm_init`（E820 → 4 KiB PMM 位图、低 1 MiB 保留 → 16 MiB 恒等分页 CR0.PG → 内核堆），
+v86 实测 16,128 空闲页，Shell/3D/reboot 在分页下全部稳定。`[已编译·未接线]`：
+rtc/device、`lib/{log,panic}`（`fmt` 已随 mm 诊断激活）。`[目标架构]`（未创建文件）：UI 的
+theme/desktop/terminal/roles/scene3d 与三角色工作区交互；UI 与把 PMM 分配的高位帧用于
+DMA 环（rtl8139 接线的先决条件）是 v6.0 自身的剩余工作。
 
 ---
 

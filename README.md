@@ -61,10 +61,11 @@ CPU 控制、字符串库、5×7 字体、以及完整的多目标构建/链接/
 | 键盘 / PIT（`src/drivers`） | **[已实现]** | PS/2 set 1 中断驱动（环缓冲 + scancode→ASCII），100 Hz 系统节拍 |
 | 3D 神经网格（`src/ui/render3d`） | **[已实现]** | Q8.8 定点旋转 + 透视投影 + Bresenham 网格，`3d` 命令进入、ESC 返回 |
 | 5×7 字体（`src/ui/font`） | **[已实现]** | Shell 文本层逐字符绘制（VGA 双缓冲） |
-| PMM / 内核堆 / 分页（`src/mm`） | **[已编译·未接线]** | 位图分配器、bump heap、恒等映射页目录填表代码齐备，均未在启动路径调用 |
+| PMM / 内核堆 / 分页（`src/mm`） | **[已实现]** | 启动路径 `mm_init`：E820 → 4 KiB PMM 位图（低 1 MiB 保留）→ 16 MiB 恒等分页开启（CR3 + CR0.PG，中断关闭态切换）→ 内核堆就绪；v86 实测 16,128 空闲页 |
+| 分页映射工具 | **[已实现]** | `paging_map_page` 在恒等窗口内映射任意物理页（带越界拒绝 + invlpg） |
 | RTC / 设备探测（`src/drivers`） | **[已编译·未接线]** | 驱动已链接，等待后续调度/设备树接线 |
 | 桌面 / 终端工作区（`src/ui/{desktop,terminal,scene3d,roles,theme}`） | **[目标架构]** | v6.1/v6.2 的四角色工作区（`render3d` 是其 3D 渲染地基） |
-| 分页启用 | **[目标架构]** | 页目录 `0x71000`、页表 `0x72000` 地址已预留，`paging_enable` 未调用 |
+| 分页启用 | **[已实现]** | 页目录 `0x71000`、页表 `0x72000..0x75FFF`，`paging_enable` 置 CR0.PG；DMA 环所需的高位帧分配地基已就位 |
 | UEFI 引导 / arm64 / 用户态 / FS / 网络 | **[目标架构]** | 仅接口骨架（`boot/uefi`、`src/arch/arm64` 为文档+头文件） |
 
 ---
@@ -109,7 +110,7 @@ ZenithOS 的宪法是七条可检验的原则。下表说明每条原则在本�
 │   │   ├── arch.h           [已实现] 架构层入口
 │   │   ├── x86_32/          [已实现] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
 │   │   └── arm64/           [接口骨架] arch.h / README.md（不参与 x86 编译）
-│   ├── mm/                  [已编译·未接线] mm.h / pmm / paging / heap（.{c,h}）
+│   ├── mm/                  [已实现] mm.h / pmm / paging / heap（.{c,h}）——mm_init 接入启动路径
 │   ├── lib/                 [已实现] string / math（render3d 定点旋转）
 │   │                        [已编译·未接线] fmt / log / panic（.{c,h}）
 │   ├── drivers/             [已实现] vga / serial / keyboard（PS/2 中断）/ pit（100 Hz）

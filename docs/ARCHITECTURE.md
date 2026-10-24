@@ -139,7 +139,7 @@ src 目录本身仍按 HAL/arch/mm/lib/drivers/kernel/ui 分层。
 | --- | --- | --- |
 | `boot/bios/boot.asm` | [已实现] | 512 字节 BIOS 引导（§7） |
 | `src/include/` | [已实现] | 自由站立头文件 + ABI：`zenith.h, config.h, config.inc, bootinfo.h, stdint.h, stddef.h, stdbool.h, stdarg.h` |
-| `src/mm/` | [已编译·未接线] | `mm.h, pmm, paging, heap`：4 KiB 位图分配器、恒等映射分页、内核堆 |
+| `src/mm/` | [已实现] | `mm.h, pmm, paging, heap`：启动路径 `mm_init` = E820 → 4 KiB PMM 位图（低 1 MiB 保留）→ 16 MiB 恒等分页（CR3 + CR0.PG）→ 内核堆 |
 | `src/lib/` | [已实现] / [已编译·未接线] | `string, math`（运行中）/ `fmt, log, panic`（已链接未调用） |
 | `src/kernel/` | [已实现] / [目标架构] | `startup.asm, kernel_main.c`（交互式 Shell，§9）/ `console, sysinfo`（未创建） |
 
@@ -337,9 +337,9 @@ src/
 │   └── arm64/             [接口骨架] arch.h / README.md（不参与 x86 编译）
 ├── mm/
 │   ├── mm.h               [已实现] 内存层入口
-│   ├── pmm.{c,h}          [已编译·未接线] 位图物理页分配器（4 KiB）
-│   ├── paging.{c,h}       [已编译·未接线] 恒等映射分页 + 启用
-│   └── heap.{c,h}         [已编译·未接线] 内核堆
+│   ├── pmm.{c,h}          [已实现] 位图物理页分配器（4 KiB，E820，低 1 MiB 保留）
+│   ├── paging.{c,h}       [已实现] 恒等映射分页 + CR0.PG 启用 + paging_map_page
+│   └── heap.{c,h}         [已实现] 内核堆（bump 分配器，mm_init 中就绪，kmalloc 待用）
 ├── lib/
 │   ├── string.{c,h}       [已实现] kmemset/kmemcpy/kmemmove/kmemcmp/kstrlen/kstrcmp/...
 │   ├── math.{c,h}         [已实现] 定点数学库（render3d 旋转矩阵；供 scene3d 线框变换）
@@ -371,7 +371,8 @@ src/
 
 > `[已编译·未接线]` 的模块在 v6.0 重写中已落地源码、并随 `node build.js` 编译链接进
 > `kernel.bin`（否则无法通过 GNU `ld` 的符号解析），但启动路径尚未调用它们——IDT/IRQ
-> 已经打开（键盘与 100 Hz 节拍中断驱动），分页启用是紧随其后的工作。`[目标架构]` 文件
+> 已经打开（键盘与 100 Hz 节拍中断驱动），16 MiB 恒等分页已在启动路径开启
+> （`mm_init`：E820 → PMM → 分页 → 堆）。`[目标架构]` 文件
 > 尚未在仓库创建。构建系统自动发现 `src/**/*.{c,asm}`，新增模块无需改 `build.js`。
 
 ---

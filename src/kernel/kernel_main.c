@@ -3,9 +3,11 @@
  *  ZenithOS v6.0 - kernel/kernel_main.c
  *  C entry point reached from startup.asm (BootInfo* in EBX).
  *
- *  Brings up the interrupt system (IDT + PIC + PIT), then runs the
- *  interactive shell: a "ZenithOS> " prompt with character echo, Backspace
- *  editing, and the commands help / clear / reboot / 3d.
+ *  Boot order: serial/VGA console -> memory bring-up (E820 -> PMM bitmap ->
+ *  identity paging -> kernel heap, done with interrupts off) -> interrupt
+ *  system (IDT + PIC + PIT) -> the interactive shell: a "ZenithOS> " prompt
+ *  with character echo, Backspace editing, and the commands
+ *  help / clear / reboot / 3d.
  *
  *  Output goes to the VGA text layer on screen and is mirrored to COM1 so
  *  every shell session also exists as a plain serial log.
@@ -21,7 +23,10 @@
 #include "drivers/vga.h"
 #include "drivers/keyboard.h"
 #include "drivers/pit.h"
+#include "mm/mm.h"
+#include "mm/pmm.h"
 #include "lib/string.h"
+#include "lib/fmt.h"
 #include "ui/font.h"
 #include "ui/render3d.h"
 
@@ -164,16 +169,30 @@ static void shell(void) {
 
 /* --- entry ---------------------------------------------------------------- */
 void kernel_main(BootInfo *info) {
-    (void)info;
-
     serial_init();
     serial_puts("\r\n");
     serial_puts("========================================\r\n");
     serial_puts(" ZenithOS v6.0  [x86_32]  booting...\r\n");
     serial_puts("========================================\r\n");
 
+    /* The E820 map PMM walks comes from the loader; refuse to build memory
+     * state on a hand-off we cannot trust. */
+    if (info->magic != BOOTINFO_MAGIC || info->version < BOOTINFO_VERSION) {
+        serial_puts("boot: fatal: BootInfo magic/version mismatch\r\n");
+        for (;;) cpu_hlt();
+    }
+
     vga_init();
     term_clear();
+
+    /* memory bring-up: E820 -> 4 KiB PMM bitmap -> identity paging (16 MiB,
+     * covers kernel/heap/bitmaps/VGA/stack) -> kernel heap.  The MMU flip
+     * must happen with interrupts off; the shell wakes them up later. */
+    cpu_cli();
+    mm_init(info);
+    klog("mm: identity paging on, %u MiB mapped, %u free / %u used 4 KiB pages\r\n",
+         (unsigned)(IDENT_MAP_BYTES >> 20),
+         (unsigned)pmm_free_pages(), (unsigned)pmm_used_pages());
 
     /* device bring-up: keyboard, 100 Hz system tick, then the interrupt
      * system (IDT installed, PIC remapped to vectors 0x20..0x2F). */

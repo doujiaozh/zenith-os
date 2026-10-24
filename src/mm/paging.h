@@ -7,6 +7,6 @@
 
 void paging_identity_init(void);
 void paging_enable(void);
-void paging_map_page(uint32_t vaddr, uint32_t paddr);
+int  paging_map_page(uint32_t vaddr, uint32_t paddr);  /* 0 ok, -1 out of window */
 
 #endif /* ZENITH_PAGING_H */

@@ -30,9 +30,17 @@ void paging_enable(void) {
     cpu_write_cr0(cpu_read_cr0() | 0x80000000);  /* PG */
 }
 
-void paging_map_page(uint32_t vaddr, uint32_t paddr) {
+/* map one 4 KiB page inside the identity window.  The tables sit contiguously
+ * after PAGE_TABLES_ADDR, so table pd is ptab[pd << 10]; a directory entry
+ * must point at table pd (not at table 0) or the mapping lands in the wrong
+ * 4 MiB window.  Returns 0 on success, -1 outside the identity window. */
+int paging_map_page(uint32_t vaddr, uint32_t paddr) {
     uint32_t pd = vaddr >> 22;
     uint32_t pt = (vaddr >> 12) & 0x3FF;
-    pgdir[pd] = (uint32_t)(uint32_t)ptab + 0;  /* tables already contiguous */
+    uint32_t ntables = IDENT_MAP_BYTES >> 22;
+    if (pd >= ntables) return -1;                     /* no table there */
+    pgdir[pd] = (PAGE_TABLES_ADDR + (pd << 12)) | PF_PRESENT | PF_WRITABLE;
     ptab[(pd << 10) | pt] = (paddr & 0xFFFFF000) | PF_PRESENT | PF_WRITABLE;
+    cpu_invlpg(vaddr);                                /* drop a stale TLB */
+    return 0;
 }
