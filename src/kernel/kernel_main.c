@@ -4,10 +4,11 @@
  *  C entry point reached from startup.asm (BootInfo* in EBX).
  *
  *  Boot order: serial/VGA console -> memory bring-up (E820 -> PMM bitmap ->
- *  identity paging -> kernel heap, done with interrupts off) -> interrupt
- *  system (IDT + PIC + PIT) -> the interactive shell: a "ZenithOS> " prompt
- *  with character echo, Backspace editing, and the commands
- *  help / clear / reboot / 3d.
+ *  identity paging -> kernel heap, done with interrupts off) -> network
+ *  bring-up (PCI scan -> rtl8139 with PMM DMA rings, IRQ routed) -> interrupt
+ *  system (IDT + PIC + PIT) -> one ARP round trip on the serial log -> the
+ *  interactive shell: "ZenithOS> " with Backspace editing and the commands
+ *  help / clear / reboot / 3d / net.
  *
  *  Output goes to the VGA text layer on screen and is mirrored to COM1 so
  *  every shell session also exists as a plain serial log.
@@ -25,6 +26,8 @@
 #include "drivers/pit.h"
 #include "mm/mm.h"
 #include "mm/pmm.h"
+#include "drivers/pci.h"
+#include "net/net.h"
 #include "lib/string.h"
 #include "lib/fmt.h"
 #include "ui/font.h"
@@ -134,6 +137,7 @@ static void cmd_help(void) {
     term_puts("  help    show this list\n");
     term_puts("  clear   clear the screen\n");
     term_puts("  3d      rotating 3D neural grid (ESC returns here)\n");
+    term_puts("  net     rtl8139 ARP round trip (see serial log)\n");
     term_puts("  reboot  restart the machine\n");
 }
 
@@ -156,6 +160,10 @@ static void shell(void) {
         if (!kstrcmp(line, "help"))          cmd_help();
         else if (!kstrcmp(line, "clear"))    term_clear();
         else if (!kstrcmp(line, "reboot"))   cmd_reboot();
+        else if (!kstrcmp(line, "net")) {
+            { char msg[48]; net_status(msg, sizeof msg); term_puts(msg); term_puts("\n"); }
+            net_arp_exchange();   /* full diagnostics on the serial log */
+        }
         else if (!kstrcmp(line, "3d")) {
             render3d_run();       /* returns after ESC; screen is cleared */
             term_clear();         /* fresh shell surface */
@@ -194,6 +202,10 @@ void kernel_main(BootInfo *info) {
          (unsigned)(IDENT_MAP_BYTES >> 20),
          (unsigned)pmm_free_pages(), (unsigned)pmm_used_pages());
 
+    /* network bring-up, part 1: PCI scan -> rtl8139 -> PMM DMA rings.
+     * Needs the PMM but not the IDT; harmless when no NIC exists. */
+    net_probe();
+
     /* device bring-up: keyboard, 100 Hz system tick, then the interrupt
      * system (IDT installed, PIC remapped to vectors 0x20..0x2F). */
     keyboard_init();
@@ -202,11 +214,16 @@ void kernel_main(BootInfo *info) {
     pic_remap(X86_IRQ_BASE, X86_IRQ_BASE + 8);
     pic_unmask(1);                  /* IRQ 1: keyboard */
     pic_unmask(0);                  /* IRQ 0: system tick for animations */
+    net_attach_irq();               /* part 2: bind + unmask the NIC line */
     cpu_sti();
 
     term_puts("ZenithOS v6.0 - interactive shell\n");
     term_puts("type 'help' for commands.\n");
     term_newline();
+
+    /* one wire round trip at boot: the ARP exchange and its reply land on
+     * the serial log, which is what the CI QEMU job greps for. */
+    net_arp_exchange();
 
     shell();
 

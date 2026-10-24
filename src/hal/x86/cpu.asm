@@ -1,68 +1,65 @@
 ; CPU control primitives (x86). cdecl ABI.
+; Both symbol spellings exported (bare for TCC/Linux GCC, '_'-prefixed for
+; mingw GCC on i386 PE); both resolve to the same code.
 [BITS 32]
 section .text
 
-global cpu_cli
-cpu_cli:
+%macro cglobal 1
+    global %1
+    global _%1
+    %1:
+    _%1:
+%endmacro
+
+cglobal cpu_cli
     cli
     ret
 
-global cpu_sti
-cpu_sti:
+cglobal cpu_sti
     sti
     ret
 
-global cpu_hlt
-cpu_hlt:
+cglobal cpu_hlt
     hlt
     ret
 
-global cpu_rdtsc
-cpu_rdtsc:
+cglobal cpu_rdtsc
     rdtsc                 ; -> edx:eax
     ret
 
-global cpu_read_cr0
-cpu_read_cr0:
+cglobal cpu_read_cr0
     mov eax, cr0
     ret
 
-global cpu_read_cr2
-cpu_read_cr2:
+cglobal cpu_read_cr2
     mov eax, cr2
     ret
 
-global cpu_read_cr3
-cpu_read_cr3:
+cglobal cpu_read_cr3
     mov eax, cr3
     ret
 
-global cpu_write_cr0
-cpu_write_cr0:
+cglobal cpu_write_cr0
     mov eax, [esp+4]
     mov cr0, eax
     ret
 
-global cpu_write_cr3
-cpu_write_cr3:
+cglobal cpu_write_cr3
     mov eax, [esp+4]
     mov cr3, eax
     ret
 
-global cpu_invlpg
-cpu_invlpg:
+cglobal cpu_invlpg
     mov eax, [esp+4]
     invlpg [eax]
     ret
 
-global cpu_lgdt
-cpu_lgdt:
+cglobal cpu_lgdt
     mov eax, [esp+4]
     lgdt [eax]
     ret
 
-global cpu_lidt
-cpu_lidt:
+cglobal cpu_lidt
     mov eax, [esp+4]
     lidt [eax]
     ret

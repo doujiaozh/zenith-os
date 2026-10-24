@@ -50,7 +50,7 @@ const argv = new Set(process.argv.slice(2));
 const quiet = argv.has('--quiet');
 const verbose = argv.has('--verbose');
 
-let NASM = null, TCC = null, LD = null, OBJCOPY = null, NM = null;
+let NASM = null, CC = null, LD = null, OBJCOPY = null, NM = null;
 
 function log(m) { if (!quiet) process.stdout.write(m + '\n'); }
 function vlog(m) { if (verbose) process.stdout.write(m + '\n'); }
@@ -108,6 +108,30 @@ function findGnu(tool) {
       continue;
     }
     if (fs.existsSync(c) && probe(c, '--version')) return c;
+  }
+  return null;
+}
+
+/* C compiler discovery: prefer the repo-local TCC, fall back to a system
+ * gcc/cc/clang that understands -m32 (Linux CI path, apt gcc-multilib).
+ * gcc -m32 emits PE objects under mingw and ELF objects on Linux; the linker
+ * stage below already handles both.
+ * `node build.js --cc <bin>` overrides discovery (CI parity testing). */
+function findCC() {
+  const gccExtra = ['-m32', '-ffreestanding', '-fno-pie', '-fno-stack-protector',
+                    // mingw GCC prefixes i386 PE symbols with '_'; our NASM
+                    // objects (and the asm->C calls) use bare names, and we
+                    // pull no system headers, so emit bare symbols.
+                    '-fno-leading-underscore'];
+  const ai = process.argv.indexOf('--cc');
+  if (ai !== -1 && process.argv[ai + 1]) {
+    return { bin: process.argv[ai + 1], kind: 'arg', extra: gccExtra };
+  }
+  const tcc = findTool('TCC', 'TCC', [path.join(ROOT, 'tcc', 'tcc.exe'), path.join(ROOT, 'tcc.exe'), 'tcc']);
+  if (tcc) return { bin: tcc, kind: 'tcc', extra: [] };
+  for (const c of ['gcc', 'cc', 'clang']) {
+    const found = findTool('CC', 'CC', [c]);
+    if (found) return { bin: found, kind: c, extra: gccExtra };
   }
   return null;
 }
@@ -205,7 +229,7 @@ function compileSources() {
     const out = objectOf(f);
     mkdirp(path.dirname(out));
     if (/\.c$/i.test(f)) {
-      run(TCC, ['-c', '-nostdinc', '-I', INC, '-I', SRC, '-I', GEN, '-o', out, f], 'tcc ' + r);
+      run(CC.bin, CC.extra.concat(['-c', '-nostdinc', '-I', INC, '-I', SRC, '-I', GEN, '-o', out, f]), 'cc ' + r);
       log('[c]   ' + r);
     } else {
       run(NASM, ['-f', 'elf32', '-I', INC, '-I', SRC, '-I', GEN, '-o', out, f], 'nasm ' + r);
@@ -353,8 +377,11 @@ function main() {
     'C:\\Program Files\\NASM\\nasm.exe', 'nasm',
   ]);
   if (!NASM) fail('NASM not found ($NASM, nasm.exe next to build.js, or PATH).');
-  TCC = findTool('TCC', 'TCC', [path.join(ROOT, 'tcc', 'tcc.exe'), path.join(ROOT, 'tcc.exe'), 'tcc']);
-  if (!TCC) fail('TCC not found ($TCC, tcc/tcc.exe next to build.js, or PATH).');
+  // C compiler: TCC first (repo-local on Windows), then the system gcc/cc
+  // (Linux CI installs it via apt: gcc + gcc-multilib for -m32 + binutils).
+  // gcc -m32 objects are PE-on-mingw / ELF-on-linux, both fine for ld below.
+  CC = findCC();
+  if (!CC) fail('No C compiler: $TCC, tcc/tcc.exe, tcc, or gcc/cc with -m32.');
   LD = findGnu('ld');
   if (!LD) fail('GNU ld not found (binutils on PATH, or C:\\mingw64\\bin).');
   OBJCOPY = findGnu('objcopy');
@@ -362,7 +389,7 @@ function main() {
   NM = findGnu('nm'); // optional
 
   log('[nasm] ' + NASM);
-  log('[tcc ] ' + TCC);
+  log('[cc  ] ' + CC.bin + ' (' + CC.kind + ')');
   log('[ld  ] ' + LD);
   log('[objcopy] ' + OBJCOPY);
   if (NM) log('[nm  ] ' + NM);
@@ -394,7 +421,7 @@ function main() {
     project: 'ZenithOS', version: '6.0.0', result: 'ok',
     started: new Date().toISOString(), finished: new Date().toISOString(),
     duration_ms: Date.now() - t0,
-    toolchain: { nasm: NASM, tcc: TCC, ld: LD, objcopy: OBJCOPY, nm: NM },
+    toolchain: { nasm: NASM, cc: CC.bin, cc_kind: CC.kind, ld: LD, objcopy: OBJCOPY, nm: NM },
     objects: objects.map((o) => o.rel),
     kernel: {
       bytes: kernel.length, budget, fill_pct: pct,

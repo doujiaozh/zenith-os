@@ -669,6 +669,39 @@ async function main() {
         null,
     );
 
+    // v86 net peer: play the part of QEMU's SLIRP gateway. The emulated
+    // NE2000 publishes every transmitted frame on the "net0-send" bus
+    // channel; when the guest asks "who has 10.0.2.2" we inject the ARP
+    // reply back on "net0-receive", which the ne2k device DMAs into the
+    // guest's Rx ring and raises as an Rx interrupt. That gives the kernel
+    // a complete Tx/Rx round trip inside the local headless emulator.
+    emulator.bus.register('net0-send', (frame) => {
+        if (!(frame instanceof Uint8Array) || frame.length < 42) {
+            console.log('[emulate] net: tx frame ignored len=' + frame.length);
+            return;
+        }
+        const hex = Array.from(frame.subarray(0, 14), (b) => b.toString(16).padStart(2, '0')).join(' ');
+        console.log('[emulate] net: tx frame len=' + frame.length + ' hdr=' + hex);
+        if (frame[12] !== 0x08 || frame[13] !== 0x06) return;   /* ethertype ARP */
+        if (frame[20] !== 0x00 || frame[21] !== 0x01) return;   /* ARP request */
+        if (!(frame[38] === 10 && frame[39] === 0 && frame[40] === 2 && frame[41] === 2))
+            return;                                             /* who has 10.0.2.2 */
+        const reply = new Uint8Array(60);
+        reply.set(frame.subarray(6, 12), 0);                    /* dst: the guest */
+        reply.set([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], 6);     /* src: gateway */
+        reply[12] = 0x08; reply[13] = 0x06;
+        reply[14] = 0x00; reply[15] = 0x01;
+        reply[16] = 0x08; reply[17] = 0x00;
+        reply[18] = 6; reply[19] = 4;
+        reply[20] = 0x00; reply[21] = 0x02;                     /* op: reply */
+        reply.set([0x52, 0x54, 0x00, 0x12, 0x34, 0x56], 22);    /* sender: gateway */
+        reply.set(frame.subarray(38, 42), 28);                  /* gateway IP */
+        reply.set(frame.subarray(22, 28), 32);                  /* target: guest mac */
+        reply.set(frame.subarray(28, 32), 38);                  /* target: guest IP */
+        emulator.bus.send('net0-receive', reply);
+        console.log('[emulate] net: ARP request for 10.0.2.2 seen -> reply injected');
+    });
+
     // Record (but do not swallow) CPU exceptions such as #GP/#UD; v86 panics
     // inside wasm when an exception handler is not implemented.
     emulator.cpu_exception_hook = (vector) => {

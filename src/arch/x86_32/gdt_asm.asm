@@ -3,8 +3,11 @@
 [BITS 32]
 section .text
 
+; both spellings exported (TCC/Linux GCC bare, mingw GCC underscored)
 global asm_reload_segments
+global _asm_reload_segments
 asm_reload_segments:
+_asm_reload_segments:
     jmp 0x08:.reload
 .reload:
     mov ax, 0x10

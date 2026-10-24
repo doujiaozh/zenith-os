@@ -11,16 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Install dependencies (NASM, TCC, build tools)
+
+    - name: Install dependencies (NASM, GCC, binutils)
       run: |
         sudo apt-get update
-        sudo apt-get install -y nasm build-essential wget
-        # 下载 TCC 的 Linux 版本并安装
-        wget https://download.savannah.gnu.org/releases/tinycc/tcc-0.9.27-linux-x86_64.tar.bz2
-        tar xjf tcc-0.9.27-linux-x86_64.tar.bz2
-        sudo cp -r tcc-0.9.27-linux-x86_64/* /usr/local/
-        sudo ldconfig
-    
+        sudo apt-get install -y nasm build-essential gcc-multilib binutils
+
     - name: Build OS
       run: node build.js

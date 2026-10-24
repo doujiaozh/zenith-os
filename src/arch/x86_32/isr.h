@@ -12,4 +12,9 @@ typedef struct regs {
 
 void isr_handler(regs_t *r);
 
+/* Install a driver IRQ handler (0..15). The handler runs with interrupts
+ * off, must ack its device, and must not block. NULL is never accepted.
+ * Returns 0 on success, -1 for an out-of-range IRQ. */
+int irq_install_handler(uint8_t irq, void (*fn)(void));
+
 #endif /* ZENITH_ISR_H */
