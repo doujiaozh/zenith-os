@@ -20,6 +20,8 @@
 !tools/**
 !docs/
 !docs/**
+!netdev/
+!netdev/**
 !screenshots/
 !screenshots/**
 !.github/
