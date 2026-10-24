@@ -1,501 +1,247 @@
-# ZenithOS Roadmap
+# ZenithOS 路线图（Roadmap）
 
-> **Current release: v1.0 — "Neural Core".** A 32-bit x86, AI-native bare-metal
-> operating system with a deterministic spiking-neural-network desktop.
-> Everything below **v1.1** is a plan, not a shipped feature.
+> **当前版本：v6.0**。这是一个从旧「全 NASM、单地址空间」架构到「C/ASM 混合、HAL 分层、
+> 4 KiB 分页、多设备」架构的**重写里程碑**。本文件是项目与其用户的公开契约：每个里程碑给出
+> 可交付物、可证伪的退出标准与风险登记，只有满足全部退出标准才会发布，否则重新划界而非改名。
 
-This roadmap is the public contract between the project and its users. It is
-organised by *release train*, not by wishlist: each milestone has concrete
-deliverables, measurable exit criteria, and a risk register. A milestone ships
-only when every exit criterion in its section is satisfied; otherwise it is
-re-scoped, not relabelled.
+关联文档：[README.md](README.md)（概览）、[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（架构）、
+[docs/SECURITY.md](docs/SECURITY.md)（安全）、[docs/ECOSYSTEM.md](docs/ECOSYSTEM.md)（生态）。
 
 ---
 
-## Table of contents
+## 目录
 
-- [Roadmap principles](#roadmap-principles)
-- [Release train at a glance](#release-train-at-a-glance)
-- [v0.1 — Bootstrap](#v01--bootstrap)
-- [v0.2 — Protected-mode kernel](#v02--protected-mode-kernel)
-- [v0.5 — Modular kernel + UI](#v05--modular-kernel--ui)
-- [v1.0 — AI-native neural desktop (current)](#v10--ai-native-neural-desktop-current)
-- [v1.1 — Observability and reliability](#v11--observability-and-reliability)
-- [v2.0 — Microkernel](#v20--microkernel)
-- [v3.0 — POSIX subsystem and ecosystem](#v30--posix-subsystem-and-ecosystem)
-- [v4.0 — Hardware co-design, AI runtime, UX](#v40--hardware-co-design-ai-runtime-ux)
-- [v5.0 — Foundation, governance, compliance](#v50--foundation-governance-compliance)
-- [Non-goals](#non-goals)
-- [Risk register](#risk-register)
-- [Release engineering](#release-engineering)
-- [How to influence this roadmap](#how-to-influence-this-roadmap)
+- [路线图原则](#路线图原则)
+- [版本总览](#版本总览)
+- [v6.0 — C/ASM 混合与 HAL（当前）](#v60--casm-混合与-hal当前)
+- [v6.1 — UEFI/arm64 启动与能力制进程](#v61--uefiarm64-启动与能力制进程)
+- [v6.2 — 微内核化与可信更新](#v62--微内核化与可信更新)
+- [v7.0 — 多核、持久化与网络](#v70--多核持久化与网络)
+- [非目标](#非目标)
+- [风险登记](#风险登记)
+- [发布工程](#发布工程)
+- [如何影响本路线图](#如何影响本路线图)
 
 ---
 
-## Roadmap principles
+## 路线图原则
 
-1. **No feature without a demo.** A merged feature must be observable in a
-   screenshot, a log line, or a test assertion produced by the normal build.
-2. **No milestone without falsifiable exit criteria.** "Better" is not a
-   criterion. "`tools/emulate.mjs` asserts ≥ 24 distinct frame hashes across
-   120 injected ticks" is.
-3. **Reliability is a feature, not a phase.** Every milestone carries a static
-   image check, a boot self-test, and a reproducible-build guarantee.
-4. **The AI is part of the kernel, not an application.** From v1.0 onward, the
-   neural model is a first-class kernel subsystem with deterministic semantics;
-   later releases may shrink it, isolate it, or accelerate it, but they cannot
-   make it non-deterministic.
-5. **Honest boundaries.** The `v1.0` column describes only what the source
-   implements today. Everything else is labelled *planned* and carries the
-   milestone that will make it real.
+1. **无演示不合并。** 合并的特性必须能在截图、日志行或测试断言中观察到。
+2. **无里程碑不立可证伪退出标准。** 「更好」不是标准；“`tools/emulate.mjs` 断言非空帧 +
+   串口 `booting` 日志”才是。
+3. **可靠性是特性，不是阶段。** 每个里程碑都携带静态镜像校验、启动日志断言与可复现构建保证。
+4. **机制与策略分离。** 任何新机制（分页、中断、驱动）必须有一个可配置的策略落点
+   （`src/include/config.h`），不允许把频率、映射范围等硬编码进机制代码。
+5. **诚实边界。** 「当前」列只描述仓库源码今天实现的内容；其余一律标注「规划」并携带对应里程碑。
 
 ---
 
-## Release train at a glance
+## 版本总览
+
+| 版本 | 主题 | 状态 |
+| --- | --- | --- |
+| **v6.0** | C/ASM 混合、HAL、4 KiB 分页、BIOS/UEFI 抽象、自适应输出、三角色工作区、文档 | **当前（重写中）** |
+| v6.1 | UEFI 原生启动、arm64 移植启动、能力制进程模型 | 规划 |
+| v6.2 | 微内核化服务、驱动隔离用户态、可信更新/回滚、无障碍完整实现 | 规划 |
+| v7.0 | 多核调度、持久化文件系统、网络栈 | 规划 |
 
 ```mermaid
 timeline
-    title ZenithOS release train
-    v0.1 Ember : BIOS boot into real-mode demo
-    v0.2 Protected : Flat GDT, 32-bit kernel, VGA primitives
-    v0.5 Modular : src tree, interrupts, keyboard, UI
-    v1.0 Neural Core : AI-native desktop, SNN, PMM, heap, self-tests
-    v1.1 Lumen : Observability, replay, watchdog
-    v2.0 Kernel Split : Microkernel, ring 3, capabilities, paging
-    v3.0 Concord : POSIX subsystem, VFS, ecosystem
-    v4.0 Forge : Hardware co-design, AI runtime, UX
-    v5.0 Meridian : Foundation, compliance, LTS
+    title ZenithOS 版本路线
+    v6.0 当前 : C/ASM 混合 + HAL + 4KiB 分页 + BIOS/UEFI 抽象 + 自适应输出 + 三角色工作区
+    v6.1 : UEFI 原生启动 + arm64 移植启动 + 能力制进程模型
+    v6.2 : 微内核化服务 + 驱动隔离用户态 + 可信更新回滚 + 无障碍完整
+    v7.0 : 多核调度 + 持久化文件系统 + 网络栈
 ```
 
-| Version | Codename | Theme | Status |
-| --- | --- | --- | --- |
-| v0.1 | *Ember* | BIOS boot into real-mode demo | Shipped |
-| v0.2 | *Protected* | Flat GDT, 32-bit kernel, VGA primitives | Shipped |
-| v0.5 | *Modular* | `src/` module tree, interrupts, keyboard, UI | Shipped |
-| **v1.0** | **Neural Core** | **AI-native desktop, SNN, PMM/heap, self-tests** | **Current** |
-| v1.1 | *Lumen* | Observability, reliability, deterministic replays | Planned |
-| v2.0 | *Kernel Split* | Microkernel, ring 3, capabilities, paging | Planned |
-| v3.0 | *Concord* | POSIX subsystem, VFS, package ecosystem | Planned |
-| v4.0 | *Forge* | Hardware co-design, AI runtime, UX polish | Planned |
-| v5.0 | *Meridian* | Foundation, global compliance, long-term support | Planned |
+---
 
-### The v1.0 architecture in one paragraph
+## v6.0 — C/ASM 混合与 HAL（当前）
 
-The 512-byte boot sector loads the kernel from CHS sector 2 to physical
-`0x10000`, captures the BIOS E820 map to `0x0500`, opens A20, switches VGA to
-mode 13h (320×200×256), installs a flat 4 GiB GDT, and jumps into protected
-mode. The modular kernel then builds a real IDT, remaps the 8259 PIC, starts the
-8254 PIT at 100 Hz, and runs a deterministic 24-neuron spiking neural network
-whose activations drive a 3D neon neural-mesh desktop on a double-buffered VGA
-framebuffer. A physical page bitmap allocator, a free-list heap, a unified
-serial-plus-ring-buffer logger, and boot self-tests complete the picture. There
-is no paging, no userspace, no scheduler, no filesystem, no network, and no
-persistent storage — and the documentation says so everywhere it matters.
+**主题：** 把内核从「单文件 NASM 镜像」重构为「C(TCC) + ASM(NASM) 混合、HAL 分层、可派生」的骨架。
+
+### 交付物
+
+- **C/ASM 混合构建。** `src/**/*.{c,asm}` 由 TCC（`-c`）编译 C、NASM（`-f elf32`）汇编 ASM，
+  二者产出 ELF32 可重定位对象；**GNU `ld`** 用 `build.js` 生成的 `kernel.ld` 脚本完成全部符号解析
+  与重定位（mingw 宿主上以 `--image-base ORG-0x1000` 输出 PE），再由 **`objcopy -O binary`**
+  平坦化产出 `kernel.bin`（`_start` 必须位于偏移 0）。构建脚本不自造链接器。
+- **HAL。** `src/hal/hal.h` + `src/hal/x86/{port,cpu}.{h,asm}`：端口 I/O（`outb/inb/outw/inw/outl/inl/io_wait`）
+  与 CPU 控制（`cli/sti/hlt/rdtsc/CR0/CR2/CR3 读写/invlpg/lgdt/lidt`）。
+- **架构层。** `src/arch/arch.h` + `src/arch/x86_32/{arch.h,gdt,idt,isr,pic}.{c,h,asm}`：
+  GDT/IDT/ISR/PIC；`src/arch/arm64/{arch.h,README.md}` 为接口骨架（仅头文件/文档，不参与 x86 编译）。
+- **4 KiB 分页。** `src/mm/{mm.h,pmm,paging,heap}.{c,h}`：位图物理页分配器（`0x30000`，16 KiB，
+  131,072 页覆盖 512 MiB）、分页（页目录 `0x71000`、恒等映射页表 `0x72000` 覆盖前 16 MiB + 启用；
+  堆末尾 `0x70000` 与页目录之间保留 4 KiB 隔离保护页，防止 bump 堆越界踩坏 MMU 状态）、
+  内核堆（`0x34000`…`0x70000`）。
+- **BIOS/UEFI 抽象。** `boot/bios/boot.asm` 已实现（A20/E820/CHS/模式 13h/写 BootInfo/进保护模式）；
+  `boot/uefi/` 提供移交规范接口骨架（`BootInfo.boot_type=1`），暂不编译。
+- **自适应输出。** 内核依据 `BootInfo.video_mode`（`0x13`/`0x03`/`0x00`）与 `BootInfo.flags`
+  （`VGA|KEYBOARD|HEADLESS|SERIAL`）选择输出路径：VGA 帧缓冲 / 文本 / 串口 / 无头。
+- **三角色工作区。** `src/ui/{font,theme,desktop,terminal,roles,scene3d}`：通用桌面↔终端热切换、
+  开发者模式（内存页/寄存器查看）、创作者模式（3D 线框视觉）。
+- **文档。** README、ROADMAP、docs/ARCHITECTURE、docs/SECURITY、docs/ECOSYSTEM。
+
+### 退出标准
+
+- `node build.js` 在仅安装 Node 18+ / NASM 2.13+ / TCC 0.9.27 i386 的干净检出上成功，并对相同源码
+  打印稳定 SHA-256。
+- `boot.bin` 恰为 512 字节且以 `0xAA55` 结尾；`kernel.bin` 不超过 60 KiB 引导窗口；镜像恰为
+  1,474,560 字节且回读校验通过。
+- 内核在 v86 无头环境下：串口输出 `ZenithOS v6.0 [x86_32] booting...`，VGA 帧非空（非单色域）。
+- `BootInfo` 校验通过：`magic=0x4F4E455A`、`version=6`；E820 描述符 `e820_count ≤ 24` 且类型/边界合法。
+
+### 当前实现现状（诚实）
+
+仓库今天已经通过退出标准的子集：BIOS 引导、BootInfo 移交、`kernel_main` C 入口存活
+（`serial_init` + `vga_init` + 空闲循环）、HAL 的 port/cpu、字符串库、完整构建/链接/
+打包管线（GNU `ld` + `objcopy`，镜像在 v86 无头串口/帧捕获下可回放）。架构层
+（GDT/IDT/ISR/PIC 的 C/ASM）、内存管理（PMM/分页/堆）、其余驱动（keyboard/pit/rtc/device）、
+5×7 字体与 `lib/{math,fmt,log,panic}` **均已落地源码、编译并链接进 `kernel.bin`，
+但 `kernel_main` 尚未调用**（`[已编译·未接线]`）。`[目标架构]`（未创建文件）：UI 的
+theme/desktop/terminal/roles/scene3d 与三角色工作区交互。打开 IDT/IRQ、启用分页与 UI 是
+v6.0 自身的剩余工作。
 
 ---
 
-## v0.1 — Bootstrap
+## v6.1 — UEFI/arm64 启动与能力制进程
 
-**Theme:** prove that the machine can be made to execute our bytes.
+**主题：** 打开第二路径（UEFI、arm64）的第一块真实砖，并在分页之上建立最小的能力制进程模型。
 
-### Deliverables
+### 交付物
 
-- `boot.asm` assembled as a 512-byte boot sector with `0xAA55` signature.
-- BIOS text output via `INT 10h`, drive number captured from `DL`.
-- Boot image exactly 1,474,560 bytes (1.44 MB), raw (no FAT dependency).
-- `build.js` that shells out to NASM and pads the image.
-- Failure paths: `DISK FAIL`, `A20 FAIL`, halted CPU.
+- **UEFI 原生启动。** 将 `boot/uefi/` 从接口骨架推进为可编译的 64 位 UEFI 应用：探测
+  `E820` / UEFI 内存映射，获取 GOP 帧缓冲（`video_mode` 记录），写 `BootInfo.boot_type=1`，退出
+  Boot Services 后进入 32 位保护模式内核（与 BIOS 路径共用 `KERNEL_ORG=0x10000` 约定）。
+- **arm64 移植启动。** 将 `src/arch/arm64/{arch.h,README.md}` 从接口定义推进为可启动骨架：
+  等价 HAL 原语（`cli/sti/hlt/CRx 对应/invlpg 对应/屏障`）与 `BootInfo` 生产路径，先在 QEMU
+  `-M virt` 下进入 C 入口。
+- **能力制进程模型。** 以 v6.0 分页为基础：页目录/页表为每个进程建立独立地址空间；能力句柄
+  （不可伪造的 handle + 权限掩码 + 授予/回收）作为唯一授权机制；最小调度（单核轮转/协作）。
 
-### Exit criteria
+### 退出标准
 
-- `node build.js` produces an image whose first 512 bytes end in `55 AA`.
-- QEMU boots to the banner and halts deterministically.
-- A deliberately corrupted NASM source makes the build fail non-zero.
+- UEFI 镜像与 BIOS 镜像都能引导到同一 `kernel_main`，且打印相同串口横幅（`boot_type` 分别为 `1`/`0`）。
+- arm64 骨架在 QEMU `-M virt` 下进入 C 入口并输出平台标识。
+- 两个进程的地址空间相互隔离（在一个进程写不扰动另一进程）；所有资源访问经能力检查；退出标准
+  由 `docs/ARCHITECTURE.md` 的能力章节与自动化断言共同证明。
 
-### Risks at this stage
+### 风险
 
-| Risk | Mitigation applied |
+| 风险 | 缓解 |
 | --- | --- |
-| Floppy geometry differs between BIOSes | CHS 0/0/2..18 is standard 1.44 MB geometry; image is padded |
-| `DL` unreliable on some firmware | Saved immediately on entry, before any BIOS call |
-| Boot sector overflows 512 bytes | `times 510-($-$$) db 0` plus an explicit size check in `build.js` |
+| UEFI 64→32 位移交复杂 | 定义统一 `BootInfo` 移交契约；UEFI 层可读、可替换、暂不优化 |
+| arm64 与 x86 语义漂移 | 统一 HAL 头文件为唯一契约；每端口自带自检 |
+| 能力制引入内核膨胀 | 能力表走固定槽位 API；信任核代码量设硬上限 |
 
 ---
 
-## v0.2 — Protected-mode kernel
+## v6.2 — 微内核化与可信更新
 
-**Theme:** leave real mode behind without losing the screen.
+**主题：** 把驱动与子系统从内核迁出，进入隔离用户态服务；并让系统可自我更新且可回滚。
 
-### Deliverables
+### 交付物
 
-- A20 enablement through BIOS `INT 15h AX=2401h`, then the fast A20 gate at
-  port `0x92`, each verified with the `0x0500`/`0x9010` aliasing test.
-- VGA mode 13h selected *before* `CR0.PE` is set.
-- Flat code (`0x08`) and data (`0x10`) descriptors covering 4 GiB.
-- 32-bit entry at `0x10000` with `ESP = 0x9F000`.
-- `rep movsd` blitter from a shadow framebuffer to `0xA0000`.
+- **微内核化服务。** 在内核外运行的用户态服务进程（显示、输入、日志），经能力制 IPC 与内核交互；
+  内核只保留机制（调度、IPC、能力、页表、中断投递）。
+- **驱动隔离用户态。** 将 `src/drivers/`（keyboard/pit/rtc/device 等）迁为受能力约束的用户态驱动
+  进程，物理端口/MMIO 由内核按能力窗口代理或授权。
+- **可信更新/回滚。** 镜像签名、A/B 槽位、启动时校验失败回滚到上一已知良好镜像（依赖持久化存储
+  最小能力，见 v7.0）。
+- **无障碍完整实现。** 补齐四角色工作区的第四个角色：极高对比度纯文本大字体面板、系统健康监控，
+  并使切换可经键盘一手完成。
 
-### Exit criteria
+### 退出标准
 
-- Kernel executes 32-bit instructions and the screen is a stable colour field.
-- No BIOS calls after the protected-mode far jump.
-- Kernel binary fits inside the bootloader's CHS load window; `build.js`
-  fails loudly when it does not.
+- 一个故障的用户态驱动可被杀死而不影响内核稳定（内核不因驱动崩溃而 panic）。
+- 显示服务在渲染桌面的同时，第二个服务仍正常运行（IPC 实测数据写入测试日志）。
+- 更新镜像签名校验失败时自动回滚并成功引导上一镜像。
+- 无障碍面板在纯文本大字体下可读，且健康监控覆盖 CPU/内存/中断核心指标。
 
-### Risks at this stage
+### 风险
 
-| Risk | Mitigation applied |
+| 风险 | 缓解 |
 | --- | --- |
-| A20 silently closed → memory aliasing | Two independent enable paths, each verified by a memory alias test |
-| GDT descriptor mistakes triple-fault | Descriptors are static and checked by a boot self-test from v1.0 |
-| Frame tearing | Shadow buffer + single contiguous blit |
+| IPC 性能断崖 | 每版本实测往返时延；快路径仅拷贝 + 批量应答 |
+| 驱动迁出后调试困难 | 每个用户态驱动自带单一职责边界与可重放日志 |
+| 回滚需持久存储 | 以只读优先、A/B 最小扇区数实现；与 v7.0 文件系统解耦 |
 
 ---
 
-## v0.5 — Modular kernel + UI
+## v7.0 — 多核、持久化与网络
 
-**Theme:** stop writing one file; start writing an operating system.
+**主题：** 从单核研究原型走向多核、可持久、可联网的完整系统。
 
-### Deliverables
+### 交付物
 
-- Source tree split into `src/arch/`, `src/drivers/`, `src/mm/`, `src/ui/`,
-  `src/lib/`, and an umbrella `src/kernel.asm`.
-- IDT with per-vector gates; exception stubs and IRQ stubs.
-- 8259 PIC remapped to `0x20`/`0x28`, with mask and EOI helpers.
-- 8254 PIT at 100 Hz driving a monotonic tick counter.
-- IRQ1 keyboard driver: scancode set 1, ring buffer, key-state tracking.
-- Back-buffered VGA primitives: pixel, line, rectangle, palette, text.
-- 5×7 bitmap font (no BIOS font dependency) and a cyberpunk theme.
-- Rotating wireframe/neural UI prototype.
+- **多核调度。** SMP 启动（AP 引导、per-CPU 数据结构、IPI）、跨核调度与负载均衡。
+- **持久化文件系统。** 最小持久化文件系统与块设备驱动，支持只读根、元数据校验。
+- **网络栈。** 最小网络栈（链路/IP 基础），默认关闭、经能力门控，解析器按安全规范优先模糊测试。
 
-### Exit criteria
+### 退出标准
 
-- Interrupts are live: the tick counter advances and a keypress appears in the
-  ring buffer without polling.
-- The UI renders at a stable rate for several minutes under QEMU.
-- Every module assembles independently through the build's compile gate.
+- 多核启动后线程在两核上正确调度并通过压力测试（无数据竞争，锁序经断言）。
+- 文件系统在重启后数据一致（掉电场景下元数据可恢复或有明确只读承诺）。
+- 网络栈对外无默认监听；能力门控决定谁可创建套接字；解析器在 fuzz 下无未处理崩溃。
 
----
+### 风险
 
-## v1.0 — AI-native neural desktop (current)
-
-**Codename:** *Neural Core.* **Theme:** a kernel whose observable state is a
-perception loop.
-
-### Deliverables (all present in the v1.0 source tree)
-
-- **Boot path:** 512-byte sector; E820 capture to `0x0500`; A20 verified; VGA
-  mode 13h; flat GDT; kernel at `0x10000` (up to 60 KiB through the CHS window).
-- **Exception handling:** full IDT; named CPU exception vectors; panic screen
-  with vector name, faulting `EIP`, and control registers.
-- **Timing and input:** PIC remap, PIT at 100 Hz, IRQ1 scancode set 1 with a
-  ring buffer, key state, and interrupt-driven camera control.
-- **Memory:** E820-driven physical page bitmap allocator (`mm/pmm.asm`);
-  free-list heap (`mm/heap.asm`).
-- **AI:** deterministic 24-neuron spiking neural network (`ai/snn.asm`) fed by
-  timer ticks and keyboard stimulus; its activations drive rendering.
-- **UI:** 24 rotating 3D neurons (two rings, four axis nodes, four core nodes),
-  40 synapse edges, 12 travelling data packets, a 72-star field, a perspective
-  floor grid, scanline/cyberpunk palette, and a HUD (title, FPS, uptime,
-  memory/PMM/heap statistics, SNN spike metrics, control hints).
-- **Camera:** `W`/`S` dolly (zoom, clamped 130–560), `A`/`D` yaw, `Q`/`E`
-  pitch (clamped ±6000), `R` reset, `C` toggle cinematic auto-rotation,
-  `Space` boost, arrow keys mirroring zoom/yaw.
-- **Libraries:** fixed-point math, string routines, unified logger
-  (serial + in-memory ring, levels + timestamps, HUD-visible), boot self-tests.
-- **Drivers:** VGA, keyboard, PIT, serial (COM1 16550), RTC (CMOS clock).
-- **Build:** `node build.js`, zero npm dependency for the OS build; NASM
-  discovery; generated 256-entry sine/cosine table; per-module compile gate;
-  1.44 MB image assembly; boot-signature / size / kernel-budget / payload
-  verification; SHA-256 printed.
-- **Verification:** headless v86 boot harness (`tools/emulate.mjs`) that
-  captures screenshots, injects WASD, and asserts a non-trivial frame.
-- **CI:** GitHub Actions `build.yml`.
-
-### Exit criteria (all satisfied for the v1.0 tag)
-
-- `node build.js` succeeds on a clean Windows/Linux/macOS checkout with only
-  Node + NASM installed, and prints a stable SHA-256 for identical sources.
-- Image is exactly 1,474,560 bytes; boot sector is exactly 512 bytes and ends
-  in `0xAA55`; kernel fits the bootloader window.
-- 10 boot self-tests report boot-info/GDT/IDT/PMM/heap/SNN/RTC/PIT/VGA/`INT
-  0x80` health.
-- `node tools/emulate.mjs` boots headlessly, captures at least one frame, and
-  validates that the frame is non-trivial (not a uniform colour field).
-- A forced exception reaches the panic screen and prints a vector name.
-
-### What v1.0 explicitly does **not** have
-
-No paging or MMU isolation. No ring 3, no userspace, no processes. No
-scheduler beyond hardware interrupt handlers. No filesystem, no persistent
-storage. No networking. No POSIX syscalls (only the `INT 0x80` ABI groundwork).
-Single CPU; no SMP, no ACPI, no power management. No audio. No USB. No dynamic
-loading. Do not plan around these existing; plan around the milestones that
-introduce them.
-
----
-
-## v1.1 — Observability and reliability
-
-**Theme:** make the loop measurable, replayable, and hard to break.
-
-### Deliverables
-
-- **Deterministic replay:** record `(tick, scancode)` event traces and replay
-  them to reproduce any frame bit-for-bit; ship a trace fixture in `tools/`.
-- **Structured logs:** stable event IDs, hexdump viewer on the panic screen,
-  log ring persistence across a warm reset (where hardware allows).
-- **Crash forensics:** register/stack dump, backtrace through a frame-pointer
-  chain, symbol map generated at build time (`kernel.map`), panic hash.
-- **Watchdog:** detect stalled main loop against the 100 Hz tick and render a
-  "kernel stalled" overlay instead of a frozen screen.
-- **Boot-time TSC calibration:** replace tick-only timing with a calibrated
-  timestamp where the CPU exposes a TSC.
-- **Regression dashboard:** CI publishes frame hashes and screenshot diffs as
-  artifacts; a golden set of frames is committed.
-- **Fault injection:** deliberate `#DE`, `#UD`, and bad-page tests behind a
-  build flag, asserting the panic screen text.
-
-### Exit criteria
-
-- A recorded trace replays to identical PNG hashes on two different hosts.
-- The watchdog fires within 500 ms of an injected infinite loop.
-- Panic output includes vector, `EIP`, `CR0/CR2/CR3`, and a stable hash.
-- CI fails on any regression in the golden frame set.
-
-### Risks
-
-| Risk | Mitigation |
+| 风险 | 缓解 |
 | --- | --- |
-| Frame hashes brittle across emulator versions | Pin the v86 version; hash structural assertions (palette histogram, edge count) alongside exact pixels |
-| Replay drift | All state changes must flow through the event queue; enforced by self-tests |
-| Flash/ROM persistence not available | Log snapshots are best-effort; never promise durable storage |
+| SMP 竞态难复现 | 调试构建加锁序断言；CI 压力测试 |
+| 文件系统数据丢失 | 只读根 + 写前日志元数据；发布前数据完整性门禁 |
+| 网络扩大攻击面 | 默认关闭、能力门控、解析器先行 fuzz |
 
 ---
 
-## v2.0 — Microkernel
+## 非目标
 
-**Theme:** split the kernel into a trusted core and untrusted servers.
+这些**不在**路线上，项目应对其说「不」：
 
-### Deliverables
-
-- **Paging:** 32-bit two-level page tables, per-address-space directories,
-  guard pages, W^X mappings.
-- **Ring 3:** user/kernel transitions through a validated trap gate; syscall
-  entry on `INT 0x80` with a versioned ABI table.
-- **Capability model:** unforgeable handles, rights masks, grant/revoke,
-  per-object access checks; no ambient authority.
-- **IPC:** synchronous message passing (send/receive/reply) with copy-in/copy-
-  out validation and bounded queues.
-- **Userspace servers:** display server (owns VGA), input server, logger
-  server, memory broker, device server skeleton.
-- **Scheduler:** preemptive round-robin/FIFO over user threads on the single
-  CPU; timer-driven preemption; priorities.
-- **Kernel object model:** threads, address spaces, endpoints, capability
-  slots, reference counts.
-- **Formal invariants in tests:** no kernel write to user memory without
-  validation; all syscalls return typed errors.
-
-### Exit criteria
-
-- A buggy userspace process can be killed without destabilising the kernel.
-- `mmap`-style allocation in two processes is isolated under test (write in one
-  is not observed in the other).
-- Message-passing ping-pong ≥ 20,000 round trips/second under QEMU (measured,
-  median of 5 runs, methodology documented in the test log).
-- The display server renders the neural desktop while a second server runs.
-- Every syscall has a table entry, an argument validator, and a test.
-
-### Risks
-
-| Risk | Mitigation |
-| --- | --- |
-| IPC performance falling off a cliff | Measure per release; batch replies; keep the fast path copy-only |
-| Capability complexity leaking everywhere | One typed handle API; no raw pointers across the boundary |
-| Ring-3 switch correctness | Exhaustive tests for bad segments, bad stack, bad pointers |
-| Larger kernel loses the "readable in one sitting" property | Trusted core capped at 64 KiB; servers separate |
+- 成为 Linux/Windows 的通用桌面替代品。ZenithOS 是可靠性优先、多设备一致的微内核化研究试验台。
+- 与 Windows / macOS 二进制兼容。
+- 默认镜像内分发专有固件。
+- 在 v6.2 能力制与隔离落地之前开放面向网络的默认服务。
+- 在具备可验证隔离（v6.2）之前宣称多租户或服务器级可扩展性。
+- 在本时间线上宣称任何合规/安全认证（见 `docs/SECURITY.md` 的诚实边界）。
 
 ---
 
-## v3.0 — POSIX subsystem and ecosystem
+## 风险登记
 
-**Theme:** run real software without becoming a general-purpose blob.
-
-### Deliverables
-
-- **VFS:** in-memory VFS plus a persistent read-only FS image (e.g. a compact
-  squashfs-like format) on floppy/IDE; mount points; path resolution; open
-  file descriptions.
-- **Process model:** `fork` (copy-on-write via paging), `exec`, `wait`, `exit`,
-  `kill`, process groups and sessions.
-- **Signals:** a POSIX-compatible subset with default actions and handlers.
-- **POSIX 2008 subset:** libc-facing syscalls for files, processes, pipes,
-  time, and terminals; documented conformance list with per-call status.
-- **C library:** port musl (preferred) or newlib on top of the syscall ABI;
-  ship a hello-world and a coreutils subset as the reference workload.
-- **Shell and userland:** a minimal shell, `ls`, `cat`, `echo`, `ps`, `kill`,
-  `sh` scripts.
-- **Package format:** signed `.zpkg` archives and a `zpkg` installer; offline
-  repository format.
-- **Ecosystem programme:** example drivers, a "first server" tutorial, and a
-  compatibility badge for third-party ports.
-
-### Exit criteria
-
-- musl's test suite passes an agreed subset; every failure is documented in
-  `docs/POSIX-COMPATIBILITY.md`.
-- `fork`/`exec`/`wait` pipeline (`ls | cat`) runs in the shell.
-- A package installs from a local repository and runs after reboot from a
-  writable image.
-- At least three third-party programs run unmodified on the POSIX layer.
-
-### Risks
-
-| Risk | Mitigation |
-| --- | --- |
-| POSIX scope creep | Only ship the documented subset; track a conformance matrix |
-| Filesystem data loss | Read-only root by default; journal metadata before enabling writes |
-| Ecosystem too small | Tutorials, porting grants (in time or recognition), CI port checks |
-| Licence contamination | musl is MIT; package metadata enforces licence fields |
+| # | 风险 | L | I | 缓解 | 责任域 |
+| --- | --- | :-: | :-: | --- | --- |
+| R1 | BIOS CHS 几何在异常固件上失败 | M | H | 标准 1.44 MB 几何；UEFI 路径在 v6.1 提供第二路线 | 引导维护者 |
+| R2 | 内核超出 60 KiB 窗口，或 C 库体积失控 | H | M | `build.js` 强制预算；每模块体积门禁入 CI | 内核维护者 |
+| R3 | 宿主 binutils 只能输出 PE（mingw），平坦化依赖 `objcopy -O binary` | M | H | 链接脚本固定 `. = KERNEL_ORG` + `--image-base ORG-0x1000`；CI 在 Linux 用原生 ELF ld 覆盖第二条路径；`nm` 回读 `_start` 入口 | 构建维护者 |
+| R4 | 多设备 HAL 语义漂移（x86 与 arm64） | M | H | 统一 HAL 头文件为唯一契约；每端口自检 | HAL 维护者 |
+| R5 | 分页恒等映射忘开/误开导致三位故障 | M | H | 页目录/页表静态布局；启动自检身份映射 | 内存维护者 |
+| R6 | 能力制/微内核化引入膨胀，失去「可读」 | M | M | 信任核代码量硬上限；服务独立 | 架构维护者 |
+| R7 | 可复现构建破坏 | M | H | 确定性工具链；每构建打印 SHA-256；版本锁定 | 构建维护者 |
+| R8 | 安全披露处理不当 | L | H | 私有上报渠道；90 天政策见 `docs/SECURITY.md` | 安全维护者 |
+| R9 | 第三方代码许可污染 | M | H | 来源检查、SPDX 头；SBOM 规划 | 维护者/法务 |
 
 ---
 
-## v4.0 — Hardware co-design, AI runtime, UX
+## 发布工程
 
-**Theme:** the OS and the machine are designed together.
-
-### Deliverables
-
-- **Hardware co-design programme:** a public device abstraction (ZenithBus)
-  covering a reference board, accelerated framebuffer, timer, and NPU block;
-  open register specifications and a QEMU device model for each.
-- **AI runtime:** an on-device inference runtime for small deterministic models
-  (int8 activation, fixed-point kernel operators), with model signing and a
-  memory budget negotiated through the microkernel.
-- **SNN v2:** learnable synapses (STDP) with deterministic seeds, auditable
-  activation traces, and a documented inference contract.
-- **UX:** a compositor with damage tracking, animation timing on the PIT/TSC,
-  accessibility modes (large text, reduced motion, high contrast), and a
-  keyboard-first command palette.
-- **Power:** ACPI-based shutdown/reboot, CPU idle states, thermal-aware frame
-  scheduling.
-- **SMP:** bring-up of a second CPU core with per-core run queues and IPIs.
-
-### Exit criteria
-
-- A model signed by the build can be loaded, run, and audited on the NPU
-  model under QEMU; its output is deterministic across runs.
-- Accessibility modes are covered by screenshot regression tests.
-- SMP boots, schedules user threads on both cores, and passes stress tests.
-- Documented power transitions (S5 shutdown, idle) work on the reference board.
-
-### Risks
-
-| Risk | Mitigation |
-| --- | --- |
-| Hardware co-design without fab access | Emulate every device in QEMU first; keep FPGA path open |
-| AI runtime bloat | Hard memory ceiling; capability-gated model loading |
-| UX regressions | Screenshot + interaction regression suite gates every merge |
-| SMP race bugs | Lockdep-style assertions in debug builds; stress tests in CI |
+- **分支：** `main` 始终可构建；发布标签为带注释标签（含提交哈希与 `zenithos.img` SHA-256）。
+- **语义：** `MAJOR.MINOR.PATCH`，`MAJOR` 为架构纪元（微内核拆分、多核），`MINOR` 为特性列车。
+  BIOS→UEFI、内核/用户态拆分、多核均为 `MAJOR`。
+- **节奏：** 重写期按可验证里程碑推进；发布贴有退出标准门禁；安全修复按需。
+- **产物（v6.0）：** `zenithos.img`、`build/boot.bin`、`build/kernel.bin`、`build/report.json`、截图。
+- **门禁：** CI（`.github/workflows/build.yml`）必须通过工具链发现、编译/汇编、链接、镜像校验；
+  v86 无头启动 + 帧断言为随附验证任务。
 
 ---
 
-## v5.0 — Foundation, governance, compliance
+## 如何影响本路线图
 
-**Theme:** make the project durable beyond its founders.
-
-### Deliverables
-
-- **Legal entity:** a non-profit foundation holding trademarks and assets.
-- **Governance:** elected technical steering committee, public RFC archive,
-  maintainer ladder, conflict-of-interest policy.
-- **Compliance programme:** documented mapping for GDPR data-minimisation,
-  accessibility, licence hygiene, and export controls; independent security
-  audits.
-- **Sustained funding:** grants/sponsorship policy, funded security work,
-  internship pipeline.
-- **LTS:** long-term-support branches with guaranteed security backports and
-  reproducible builds.
-- **Globalisation:** translated docs (`docs/i18n/`), regional community
-  chapters, inclusive Contributor Covenant enforcement.
-
-### Exit criteria
-
-- A published foundation charter and a TSC elected by public process.
-- Two independent reproducible builds attest to the same SHA-256.
-- Annual security audit published with tracked remediation.
-- At least three LTS consumers with documented support agreements.
+1. 阅读 `docs/ECOSYSTEM.md`（开放治理）与 `docs/ARCHITECTURE.md`，用议题/评审流程提出变更。
+2. 小改动（文档、测试、常量调整）可直接提 PR。
+3. 架构变更（新子系统、ABI 变更、内存模型变更）需书面提案 + 可运行原型（可置于构建开关之后）。
+4. 路线图编辑由维护者评审，合并时带变更记录。
 
 ---
 
-## Non-goals
-
-These are **not** on the roadmap, and the project should say no to them:
-
-- Becoming a general-purpose desktop competitor to Linux/Windows. ZenithOS is
-  a testbed for AI-native, reliability-first kernel design.
-- Binary compatibility with Windows or macOS.
-- Shipping proprietary blobs in the default image.
-- Network-facing services in the default build before v3.0 hardening.
-- Distributed consensus, server-class scalability, or multi-tenant isolation
-  before v2.0 capabilities exist.
-- Promising certifications (SOC 2, ISO 27001, IEC 62443) on the v1.x
-  timeline; see `docs/COMPLIANCE.md` for aspirational language.
-
----
-
-## Risk register
-
-Project-level risks, reviewed at each release. Likelihood/impact are
-qualitative: H/M/L.
-
-| # | Risk | L | I | Mitigation | Owner |
-| --- | --- | --- | --- | --- | --- |
-| R1 | Bootloader CHS geometry breaks on exotic firmware | M | H | Standard 1.44 MB geometry; LBA/EDD second stage planned for v1.1 | Boot maintainer |
-| R2 | Kernel outgrows the load window | H | M | 60 KiB budget enforced by `build.js`; per-module size budget in CI | Kernel maintainer |
-| R3 | Frame budget misses on slow emulators | M | M | Render work bounded per frame; FPS shown in HUD; degrade path planned | UI maintainer |
-| R4 | Determinism drift in SNN | M | H | All randomness from fixed seeds; replay tests in v1.1 | AI maintainer |
-| R5 | Panic path itself faults | M | H | Panic code is minimal, no heap, no locks; tested via fault injection | Kernel maintainer |
-| R6 | Reproducible build breaks | M | H | Deterministic assembler only; SHA-256 checked per build; pins documented | Build maintainer |
-| R7 | Bus factor | H | H | Documentation-first culture; two reviewers per subsystem; roadmap in repo | Lead |
-| R8 | Scope creep into general-purpose OS | H | M | Non-goals list; RFC review for every new subsystem | TSC |
-| R9 | Security disclosure mishandled | L | H | Private reporting channel; 90-day policy in SECURITY.md | Security maintainer |
-| R10 | License contamination from third-party code | M | H | Provenance checks in review; SPDX headers; SBOM generation planned | Legal/maintainers |
-
----
-
-## Release engineering
-
-- **Branching:** `main` is always buildable; release tags are annotated
-  (`v1.0.0`) with a commit hash and SHA-256 of `zenithos.img`.
-- **Version semantics:** `MAJOR.MINOR.PATCH` where `MAJOR` is an architecture
-  epoch (kernel split, POSIX, hardware), `MINOR` a feature train, `PATCH` a
-  fix-only release. A BIOS-to-UEFI change or a kernel/userspace split is a
-  major bump.
-- **Cadence:** feature trains every 6–9 months once v1.1 lands; security fixes
-  as needed; an LTS tag every 24 months from v3.0.
-- **Artifacts (v1.0):** `zenithos.img`, `boot.bin`, `kernel.bin`,
-  `build/report.json` (hashes + checks), and screenshots. Planned additions:
-  `SHA256SUMS` and `kernel.map`.
-- **Gate:** the required CI job (`build.yml` → build) must pass assembler
-  success, image validation, and artifact upload. The headless boot/frame
-  assertion runs as an advisory visual job in v1.0 and becomes required in
-  v1.1.
-- **Deprecation:** syscall ABI entries are versioned; removal requires one
-  minor release of warnings logged through the unified logger.
-
----
-
-## How to influence this roadmap
-
-1. Read `docs/GOVERNANCE.md` and open an RFC issue using the template.
-2. Small changes (docs, tests, driver tweaks) can go straight to a pull
-   request.
-3. Architecture changes (new subsystem, ABI change, memory-model change)
-   require an accepted RFC and a working prototype behind a build flag.
-4. Roadmap edits are reviewed by the maintainers in the weekly triage and land
-   with a changelog entry.
-
----
-
-*ZenithOS roadmap — ship small, ship honest, ship the loop.*
+*ZenithOS 路线图 —— 小步交付，诚实交付，把机制与策略分开交付。*

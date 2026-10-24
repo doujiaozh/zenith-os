@@ -1,358 +1,240 @@
-# ZenithOS Security
+# ZenithOS 安全（Security）
 
-> **Scope note (v1.0).** ZenithOS v1.0 is a single-address-space, ring-0,
-> no-paging operating system with no userspace, no filesystem, no network, and
-> no persistent storage. It cannot host untrusted applications. The most
-> important sentence in this document is this one: **v1.0 provides
-> reliability-oriented safety, not security isolation.** Everything labelled
-> *planned* is not implemented.
+> **范围说明（v6.0，重写进行中）。** ZenithOS 的宪法安全原则是四条：**默认安全**、**最小权限 /
+> 能力制**、**强隔离**、**隐私内置**。本文把这些原则落到**本实现**：当前工作树的能力、威胁模型、
+> 攻击面清单、已做到的缓解，以及按里程碑的下一步。诚实前提是——v6.0 目前是单一地址空间、ring 0、
+> 无用户态、无文件系统、无网络的系统，**尚未提供进程级隔离**；隔离能力在 v6.1/v6.2 交付。
+> 本文所有「规划」一律如实标注。
 
-Security reports: see [§8 Responsible disclosure](#8-responsible-disclosure).
-
----
-
-## 1. Security properties in one table
-
-| Property | v1.0 | Target milestone |
-| --- | --- | --- |
-| Memory isolation between components | **None** — flat 4 GiB segments, single address space, no paging | v2.0 |
-| Privilege separation (ring 3) | **None** — all code runs at CPL 0 | v2.0 |
-| Attack surface from untrusted input | Keyboard scancodes and BIOS data only | v2.0 |
-| Network attack surface | **None** — no network stack | v3.0 |
-| Persistent storage attack surface | **None** — no filesystem | v3.0 |
-| Signed images | **None** | v2.0 (design), v4.0 (product) |
-| Measured/secure boot | **None** | v4.0 |
-| W^X enforcement | **N/A** — no page tables | v2.0 |
-| Stack canaries / bounds hardening | **None** | v1.1 (selected modules) |
-| Reproducible build | **Yes** — deterministic NASM build, SHA-256 printed and verified | v1.0 (shipped), attestation v5.0 |
-| Managed vulnerability disclosure | **Yes** — policy below | v1.0 (documented) |
-| Fuzzing | **No** | v1.1 |
-
-The honest summary: v1.0's security work is **supply-chain integrity and
-crash-safety**, not containment of hostile code.
+安全上报见 [§7 负责任披露](#7-负责任披露)。
 
 ---
 
-## 2. Threat model
+## 目录
 
-### 2.1 Assets
+- [1. 安全四原则与本实现的映射](#1-安全四原则与本实现的映射)
+- [2. 威胁模型](#2-威胁模型)
+- [3. 攻击面清单](#3-攻击面清单)
+- [4. 当前缓解](#4-当前缓解)
+- [5. 下一步（分页 / 特权级分离 / 驱动隔离）](#5-下一步分页--特权级分离--驱动隔离)
+- [6. 待验证安全不变量](#6-待验证安全不变量)
+- [7. 负责任披露](#7-负责任披露)
 
-What would an attacker want?
+---
 
-1. **Integrity of the boot image** — the bytes the CPU executes. If an
-   attacker can change `zenithos.img`, they own the machine before any kernel
-   code runs.
-2. **Determinism of the neural model** — the project claims the SNN is
-   auditable and reproducible; tampering breaks that guarantee and any future
-   attestation built on it.
-3. **Build integrity** — the mapping from source commit to image hash.
-4. **Developer machines** — the build invokes NASM and, for the test harness,
-   Node; a compromised toolchain compromises the artifact.
-5. **Future user data** (post-v3.0) — files, credentials, model weights.
-   **Nothing exists today.**
+## 1. 安全四原则与本实现的映射
 
-### 2.2 Adversaries
+| 原则 | 含义 | v6.0 当前 | 目标里程碑 |
+| --- | --- | --- | --- |
+| **默认安全**（secure by default） | 不安全的能力默认关闭，需显式开启 | 无网络/无存储/无第三方镜像代码；构建期强制尺寸/签名/回读校验 | v6.0 持续；签名镜像 v6.2 |
+| **最小权限 / 能力制** | 任何资源访问需显式授权，无环境权限（ambient authority） | HAL 封装全部特权指令（唯一入口）；BootInfo 校验；无用户态触发面 | v6.1 能力制进程模型 |
+| **强隔离** | 组件间内存/权限互不越界 | 目标：4 KiB 分页恒等映射（页目录 `0x71000` / 页表 `0x72000`）已规划，代码已编译未启用 | v6.0 分页启用；v6.2 驱动隔离用户态 |
+| **隐私内置**（privacy by design） | 数据默认本地、最小化、不外发 | 无网络、无遥测、无持久化；日志仅 COM1 + 内存环形 | 保持；随生态扩展持续审计 |
 
-| Adversary | Capability | Relevance to v1.0 |
+**诚实总结：** 当前 v6.0 已做到的是**供应链完整性与崩溃可诊断**；**进程隔离尚未实现**。分页、ring 3、
+驱动隔离、能力制按 `ROADMAP.md` 依次落地，本文 §5 给出每步的「下一步」。
+
+---
+
+## 2. 威胁模型
+
+### 2.1 资产
+
+1. **引导镜像完整性**——CPU 实际执行的字节。改 `zenithos.img` 即取得全权。
+2. **BootInfo 移交完整性**——引导器给内核的内存映射/显示模式等事实，被篡改会导致内核信任错误输入。
+3. **构建映射**——从提交源码到镜像哈希的可复现映射。
+4. **开发者机器 / 工具链**——构建调用 NASM、TCC、Node；工具链被投毒则制品被投毒。
+5. **未来用户数据**（v6.2 持久化之后）——今天不存在。
+
+### 2.2 攻击者
+
+| 攻击者 | 能力 | 对 v6.0 的相关性 |
 | --- | --- | --- |
-| **Physical attacker** | Can write the floppy image, attach devices, probe DMA/MMIO | Primary threat; no mitigation in v1.0 beyond the boot checks |
-| **Supply-chain attacker** | Can modify repo, CI, or release artifacts | Relevant: reproducible builds + SHA-256 help detection, not prevention |
-| **Malicious input** (keyboard controller, BIOS data) | Can send arbitrary scancodes / corrupt boot info | Relevant but tiny surface; ring-0 parser must be robust |
-| **Network attacker** | Remote | **Not applicable** — no network |
-| **Malicious local application** | Runs code in the OS | **Not applicable** — no userspace, no application loading |
-| **Insider on the build host** | Can change NASM or Node | Relevant: pinned tool versions, reproducible builds |
-| **DMA-capable device** | Reads/writes physical memory directly | Relevant the moment non-boot devices are enabled; see §4.3 |
+| 物理攻击者 | 重写软盘镜像、接入设备、DMA/MMIO 探测 | 首要威胁；当前仅在引导/构建校验层面缓解 |
+| 供应链攻击者 | 改仓库、CI、发布制品 | 可复现构建 + SHA-256 助检测而非预防 |
+| 恶意输入（8042 键盘、BIOS E820） | 发送任意 scancode / 污染引导信息 | 面小但真实；ring-0 解析器必须健壮 |
+| 网络攻击者 | 远程 | **不适用**（无网络栈） |
+| 恶意本地应用 | 在 OS 内运行代码 | **不适用**（无用户态、无加载） |
+| 构建主机内鬼 | 篡改 NASM/TCC/Node | 相关：锁定版本、可复现构建 |
+| DMA 设备 | 直接读写物理内存 | 一旦启用总线主控设备即相关（§3.4） |
 
-### 2.3 Trust boundaries
+### 2.3 信任边界
 
 ```text
-  +---------------------------- untrusted ----------------------------+
-  |  floppy image bytes   BIOS/firmware   keyboard controller   DMA   |
-  +------------------------------+------------------------------------+
-                                 |
-                    +------------v-------------+
-                    |   boot sector (16-bit)   |  <-- validates payload
-                    +------------+-------------+
-                                 | handoff: E820 + boot magic
-                    +------------v-------------+
-                    |  kernel, ring 0, flat    |  <-- all code trusted
-                    |  no userspace boundary   |
-                    +--------------------------+
+  ┌───────────────────── 不可信 ─────────────────────┐
+  │ 软盘镜像字节    BIOS/固件    键盘控制器(8042)   DMA │
+  └───────────────────────┬───────────────────────────┘
+                          │
+            ┌─────────────v──────────────┐
+            │ 引导扇区（16 位，校验 payload）│
+            └─────────────┬──────────────┘
+                          │ 移交：BootInfo + E820
+            ┌─────────────v──────────────┐
+            │ 内核，ring 0，单地址空间      │  ← 当前全部代码同属一个信任域
+            │ （暂无用户态边界）            │
+            └────────────────────────────┘
 ```
 
-There is exactly one privilege boundary in v1.0: **the boot sector trusting
-what the BIOS and the disk hand it**. Everything after the protected-mode
-jump is one trust domain.
+当前唯一特权边界：**引导器信任 BIOS 与磁盘交来的内容**。进入保护模式后即一个信任域，直到 v6.1
+引入进程模型、v6.2 引入用户态服务。
 
 ---
 
-## 3. Current mitigations (what v1.0 actually does)
+## 3. 攻击面清单
 
-### 3.1 Boot-path hardening
+### 3.1 内核解析的输入
 
-- **Boot signature validation.** `build.js` refuses to ship an image whose boot
-  sector does not end in `0xAA55`, is not exactly 512 bytes, or exceeds the
-  kernel budget.
-- **Payload read-back.** After writing `zenithos.img`, the builder re-reads it
-  and compares both the boot sector and the kernel region byte-for-byte
-  against the freshly assembled binaries. A truncated or misaligned image
-  fails the build rather than being committed.
-- **Deterministic image layout.** Boot sector at LBA 0, kernel at LBA 1, image
-  zero-padded to exactly 1,474,560 bytes. There is no uninitialised memory in
-  the file.
-- **Kernel budget enforcement.** The CHS load window is fixed at 60 KiB;
-  the build fails if the kernel overflows it, preventing silent partial loads.
-- **BIOS hand-off block validation.** The boot sector writes a magic/version
-  block (magic `ZENO`, `BOOTINFO_VERSION 1`) at `0x0500`; the kernel checks the
-  magic before trusting any E820 entry.
-- **Failure paths halt loudly.** `DISK FAIL` and `A20 FAIL` halt the CPU in
-  real mode rather than continuing with a corrupt environment.
-- **No BIOS calls after the protected-mode jump.** Firmware interfaces are
-  abandoned once the kernel starts, removing an entire class of confused-deputy
-  bugs.
-- **Assets:** `src/include/config.inc` is the single source of truth for the
-  loader/kernel memory contract, reducing drift between the two halves.
-
-### 3.2 Runtime robustness (crash-safety, not security)
-
-- **Double buffering** prevents partial frames and reduces timing-dependent
-  visual corruption.
-- **Bounded keyboard ring buffer** (64 entries) with wrap handling instead of
-  unbounded growth.
-- **Static memory map** — no paging means no page-fault side channels, but also
-  no isolation; buffers are fixed-size and reviewed by hand.
-- **Boot self-tests** for the boot-info hand-off, GDT, IDT, PMM, heap, SNN,
-  RTC, PIT interrupt delivery, VGA back buffer, and the `INT 0x80` ABI surface
-  broken invariants early, before the UI starts.
-- **Panic path** for CPU exceptions prints the vector name, error code,
-  faulting `EIP`, `CR2`, and `CR0` (with `CR3` captured) to the screen and the
-  full record to serial, then halts deterministically. A crash is diagnosable
-  rather than silent.
-- **Unified logger** to COM1 plus an in-memory ring buffer; useful for
-  triage, with the caveat that logs are volatile.
-- **100 Hz monotonic tick** for timing; no reliance on wall-clock ordering for
-  correctness.
-
-### 3.3 Build and supply-chain integrity
-
-- No npm dependencies in the OS build; only Node's built-in modules.
-- NASM is located via `NASM`, the repo root, or `PATH`; the version is printed
-  in the build log.
-- The build prints the SHA-256 of the final image; identical sources produce an
-  identical hash.
-- The OS image contains only project-authored assembly; no third-party blobs.
-- CI builds from a clean checkout (`build.yml`).
-
-### 3.4 What v1.0 deliberately does *not* claim
-
-- It is **not** a sandbox, container, hypervisor, or secure enclave.
-- It is **not** hardened against physical DMA attacks.
-- It does **not** verify a signature before booting; anyone who can write the
-  image can run code.
-- It does **not** isolate kernel subsystems; a bug anywhere (including the SNN)
-  runs with full privileges.
-- It is **not** suitable for multi-user or safety-critical use.
-
----
-
-## 4. Exploit surface analysis
-
-The attack surface is unusually small for an OS because the OS has almost no
-interfaces. That is the security advantage of minimalism — and the reason the
-project is candid that the advantage disappears at v2.0 unless isolation is
-done properly.
-
-### 4.1 Inputs the kernel parses
-
-| Input | Source | Trust | Risk |
+| 输入 | 来源 | 信任度 | 风险 |
 | --- | --- | --- | --- |
-| Scancodes | 8042 keyboard controller, port `0x60` / IRQ1 | Untrusted | Ring-buffer bounds; table lookup must be total |
-| E820 memory map | BIOS `INT 15h E820`, copied to `0x0500` | Semi-trusted | Kernel must validate entry count and types before building the PMM bitmap |
-| RTC/CMOS registers | Ports `0x70`/`0x71` | Semi-trusted | BCD conversion and range checks; never used for security decisions |
-| Serial status | COM1 `0x3F8` | Host-controlled | Output-only in v1.0; no parser |
-| PIT ticks | 8254 | Trusted hardware | Counter wraparound handled arithmetically |
+| 引导镜像字节 | 磁盘 LBA 0..120 | **不可信** | 引导/内核代码自身；无签名校验（当前） |
+| E820 内存映射 | BIOS `INT 15h E820` → `0x510` | 半可信 | 构建 PMM 位图前必须校验条数（≤24）与类型/边界 |
+| BootInfo 头 | 引导器写入 `0x500` | 半可信 | 必须校验 `magic`/`version`，超界 `e820_count` 必须拒绝 |
+| scancode | 8042 端口 `0x60` / IRQ1 | **不可信** | 环形缓冲边界、查表必须全映射 |
+| CMOS/RTC 寄存器 | 端口 `0x70`/`0x71` | 半可信 | BCD 转换与范围检查；不得用于安全决策 |
+| 串口状态 | COM1 `0x3F8` | 宿主可控 | v6.0 输出型为主；接收路径（若启用）需边界 |
+| PIT 计数 | 8254 | 可信硬件 | 计数回绕需算术处理 |
 
-There is no filesystem parser, no network parser, no ELF loader, no font file
-parser, and no model file parser in v1.0. Each of those is a future attack
-surface and is budgeted for fuzzing before it ships.
+当前无文件系统、网络、ELF 加载、模型文件解析器——这些是未来攻击面，上线前需模糊测试（§5）。
 
-### 4.2 Privileged interfaces
+### 3.2 特权接口
 
-| Interface | v1.0 | Notes |
+| 接口 | 现状 | 说明 |
 | --- | --- | --- |
-| `INT 0x80` | Software trap | Minimal native call table (5 calls: ticks, serial write, SNN energy, heap used, PMM free KiB), DPL-3 gate, self-tested from ring 0 | No user mode exists yet; pointer arguments are not validated for user addresses |
-| Port I/O | Kernel-wide access to `0x60`, `0x64`, `0x3F8`, `0x40–0x43`, `0x20–0x21`, `0x70–0x71`, `0x3C8–0x3C9` | Ring 0 only; future capability check |
-| MMIO | VGA `0xA0000` | Ring 0 only |
-| Interrupts | IDT gates for exceptions, IRQs, `INT 0x80` | Installed by the kernel; vectors named in panic output |
+| 特权指令 | HAL 封装（`cpu_cli/sti/hlt/rdtsc/CRx/invlpg/lgdt/lidt`） | ring 0；未来能力门控 |
+| 端口 I/O | HAL 封装（`outb/inb/...`） | ring 0；驱动经 HAL 而非裸 `out/in` |
+| MMIO | VGA `0xA0000` 帧缓冲 | ring 0 |
+| 中断 | IDT 异常/IRQ 门（`src/arch/x86_32/isr`，目标结构） | 内核安装，panic 输出向量名 |
+| 系统调用 | 尚未定义（v6.1 能力制进程模型引入） | 当前无跨特权级 ABI |
 
-### 4.3 Physical attacks and DMA
+### 3.3 构建与供应链面
 
-- **Floppy image replacement** is trivially available to a physical attacker.
-  v1.0 has no signature check. Mitigation roadmap: signed images (v2.0 design,
-  v4.0 product), measured boot with a TPM-like root of trust (v4.0).
-- **DMA** — the moment a bus-mastering device is enabled, an attacker with
-  device access can read/write any physical address. v1.0 enables no
-  bus-mastering drivers, but the plan must include an IOMMU or restricted DMA
-  windows *before* such drivers ship. This is a hard requirement for v2.0's
-  device-server work.
-- **Cold-boot / memory probing** — all state is in DRAM with no encryption.
-  Out of scope until a product defines a threat model that requires it.
+- 引导/NASM/TCC 的发现与调用（路径、版本）；版本打印进日志。
+- 镜像打包后的回读校验、零尾校验、SHA-256。
+- CI 从干净检出构建。
 
-### 4.4 Non-security bugs that can become security bugs
+### 3.4 物理攻击与 DMA
 
-- **Unbounded loops** in rendering could hang the system (availability).
-  Watchdog planned in v1.1.
-- **Fixed-size buffers** in the logger and keyboard ring: off-by-one errors
-  would corrupt kernel state. Code review + assertion coverage; fuzzing plans
-  below.
-- **SNN arithmetic** uses 16/32-bit fixed point: overflow must be bounded by
-  construction and checked by self-tests.
+- **软盘镜像替换**对物理攻击者可行；v6.0 无签名校验。缓解路线：签名镜像 + 可信更新/回滚（v6.2）。
+- **DMA**——启用总线主控设备前必须制定 IOMMU 或受限 DMA 窗口，否则设备可读写任意物理地址；
+  这是 v6.2 驱动隔离的前置条件。
+- **冷启动 / 内存探测**——状态在未加密 DRAM；待产品化威胁模型再定。
 
 ---
 
-## 5. Hardening roadmap
+## 4. 当前缓解
 
-### 5.1 v1.1 — robustness and observability
+### 4.1 引导路径
 
-- Panic forensics: symbol map, stack dump, backtrace, stable panic hash.
-- Watchdog for stalled main loop.
-- Compile-time assertions for buffer sizes and structure layouts.
-- Fuzz harness for the only real parser in the system (scancode handling) and
-  for the boot-info decoder; run under v86 in CI.
-- Deterministic replay so crashes are reproducible from a trace.
-- Optional debug build with extra padding/poison on stack and heap.
-- Security-focused review checklist added to the PR template.
+- **尺寸/签名/预算强制。** `build.js` 拒绝非 512 字节、无 `0xAA55`、超 60 KiB 的内核镜像。
+- **回读校验。** 打包后重新读取并逐字节比对引导与内核区；截断/错位镜像使构建失败。
+- **确定性布局。** 引导在 LBA 0、内核在 LBA 1、镜零填充至 1,474,560 字节；无未初始化字节。
+- **BootInfo 校验。** 移交块带 `magic`/`version`；内核预期校验 `magic='ZENO'`、`version=6`、
+  `e820_count ≤ 24`，通过后才信任映射。
+- **失败路径大声停机。** `DISK`/`A20` 失败在实模式停机，不带病继续。
+- **进保护模式后不再调用 BIOS。** 消除一整类 confused-deputy 缺陷。
+- **单一事实来源。** `config.inc`/`config.h` 镜像，减少引导器与内核的契约漂移。
 
-### 5.2 v2.0 — isolation (the big one)
+### 4.2 运行时健壮性（崩溃安全，非隔离）
 
-- **Paging** with per-process address spaces; kernel mapped read-only to user
-  where possible, with a separate kernel stack per task.
-- **Ring 3** entry/exit through validated trap gates; no direct user pointers
-  in kernel data structures.
-- **W^X** page permissions; no executable stacks; no writable code.
-- **Capability model** as the *only* authority mechanism: every resource
-  (memory window, endpoint, device register range, model handle) requires a
-  capability with an explicit rights mask.
-- **Validated syscall ABI** with a version table, argument copy-in/copy-out,
-  bounds checks, and typed errors.
-- **DMA isolation** through an IOMMU abstraction or restricted IOMMU-less
-  windows before any bus-master driver ships.
-- **ASLR for user tasks** (modest, given 3 GiB address space); canaries and
-  guard pages in the userspace runtime.
-- **Kernel self-protection:** read-only kernel text (via paging), null-page
-  unmapped, SMEP/SMAP where the CPU supports it, CR0.WP enabled.
+- 双缓冲防部分帧；有界键盘环形缓冲（`KBD_BUF_SIZE 64`）。
+- 静态内存映射（分页启用前无隔离，但缓冲为固定大小、人工审阅）。
+- panic 路径输出向量名、错误码、`EIP`、`CR2`、`CR0`（`CR3` 捕获）并停机；崩溃可诊断而非静默。
+- 100 Hz 单调 tick 计时；不依赖墙钟排序做正确性。
 
-### 5.3 v3.0 — system-level hardening
+### 4.3 供应链完整性
 
-- Filesystem integrity: checksummed metadata, read-only root by default,
-  signed packages.
-- Network stack: fuzzed parsers, no ambient access to sockets, capability-
-  gated networking, mandatory rate limits.
-- POSIX layer: syscall filtering, per-process limits, rlimits.
-- Auditable boot log delivered to userspace through a read-only log server.
+- OS 构建零 npm 依赖；仅 Node 内置模块。
+- 工具链版本打印；镜像 SHA-256 每次构建输出，相同源码产出相同哈希。
+- 镜像仅含项目自写 C/ASM；无第三方二进制。
 
-### 5.4 v4.0 — platform trust
+### 4.4 明确不声称
 
-- **Signed images:** detached Ed25519 (or similar) signatures over the image,
-  verified by a verified loader; key rotation policy.
-- **Measured boot:** hash chain of boot components recorded and exposed for
-  attestation; recovery mode when verification fails.
-- **Secure update:** A/B image slots with rollback protection where storage
-  exists.
-- **Hardware root of trust** for a reference board; documented threat model
-  against physical attacks.
-- **Model signing** for the AI runtime; refuse unsigned or out-of-budget
-  models.
-- **Independent security audit** before any v4.x product claim.
-
-### 5.5 v5.0 — process
-
-- Private security team with published membership.
-- Coordinated disclosure SLAs with downstream distributors.
-- Annual third-party audit and public remediation tracking.
-- Bug bounty or funded security research programme.
-- SBOM per release; reproducible-build attestations (SLSA-style) where the CI
-  platform supports it.
+- 不是沙箱 / 容器 / 管理程序 / 安全 enclave。
+- 不防御物理 DMA；不校验镜像签名（当前）。
+- 不隔离内核子系统；任何 bug 以全权运行。
+- 不适合多用户或安全关键场景。
 
 ---
 
-## 6. Security invariants we intend to test
+## 5. 下一步（分页 / 特权级分离 / 驱动隔离）
 
-These become executable assertions as the milestones land:
+按里程碑递进，每步都在上一隔离基础上叠加。
 
-1. No user-space pointer is dereferenced by the kernel without validation.
-2. No writable mapping is executable; no executable mapping is writable.
-3. Every capability-mediated operation checks rights before performing I/O.
-4. Every syscall returns a typed error for malformed arguments and never
-   panics on user input.
-5. The kernel image is byte-identical when rebuilt from the same commit with
-   the pinned toolchain.
-6. The PMM never hands out the same physical page twice; freeing a page twice
-   is detected in debug builds.
-7. The heap allocator detects double-free and canary corruption in debug
-   builds.
-8. A fault in any userspace server cannot take down the kernel.
+### 5.1 v6.0（当前目标）——分页启用
+
+- **恒等映射启用。** `paging_identity_init` 建立页目录（`0x71000`）与页表（`0x72000`，前 16 MiB 恒等），
+  置 `CR0.PG` 后校验恒等映射自洽（读回已知地址）。代码已链接进镜像（`[已编译·未接线]`），启用在即。
+  页目录与内核堆（末字节 `0x6FFFF`）之间留有 4 KiB 保护页，bump 堆越界先踩死区而非 MMU 状态。
+- **空页/低页保护。** 将 `0x0` 页与未映射页保持未映射，使空指针解引用立刻 `#PF` 而非静默写 `0x0000`。
+- **W^X 准备。** 页表结构支持对代码页只读、数据页非执行（为后续 ring 3 的 W^X 打底）。
+- **把 E820/PMM 校验做实。** `e820_count`、类型、边界、与页边界取整，杜绝越界位图写。
+
+### 5.2 v6.1——特权级分离 + 能力制
+
+- 每进程独立页目录/页表；内核映射对用户只读（可行处），每任务独立内核栈。
+- ring 3 通过校验过的 trap gate 进出；内核不得直接解引用用户指针，需 copy-in/copy-out + 边界校验。
+- 能力模型作为**唯一**授权机制：内存窗口、端点、设备寄存器范围等资源均需带权限掩码的能力句柄。
+- W^X：无可写可执行页；无执行栈。
+- 系统调用 ABI 带版本表、参数校验、类型化错误（仿原 v1.x 的 `INT 0x80` 前置，但加入真正校验）。
+
+### 5.3 v6.2——驱动隔离 + 可信更新
+
+- **驱动隔离用户态。** 将 `src/drivers/` 迁为受能力约束的用户态服务，端口/MMIO 由内核按能力窗口
+  代理或授权；一个故障驱动可被杀死而不损内核。
+- **DMA 隔离。** 在任一总线主控驱动上线前实现 IOMMU 抽象或受限 DMA 窗口。
+- **可信更新/回滚。** 镜像签名、A/B 槽位、启动校验失败自动回滚上一良好镜像。
+- **微内核化服务。** 显示/输入/日志迁入用户态，内核只留调度、IPC、能力、页表、中断投递。
+
+### 5.4 持续
+
+- 键鼠 scancode 解析、BootInfo 解码、E820 解析的 fuzz 门禁（在 v86/CI 下运行）。
+- 结构布局 `static_assert`；调试构建加栈/堆 canary 与毒化。
+- 发布前结构化安全评审清单进 PR 模板。
 
 ---
 
-## 7. What to do if you think you found a vulnerability
+## 6. 待验证安全不变量
 
-Please **do not** open a public issue with exploit details. Use one of:
+这些随里程碑落地变为可执行断言：
 
-1. **GitHub Security Advisory** — the repository's *Security → Advisories →
-   Report a vulnerability* flow (preferred; encrypted in transit and private
-   to maintainers).
-2. If advisories are unavailable, contact the lead maintainer through the
-   private address published in the repository profile and mark the message
-   `[ZENITHOS SECURITY]`.
+1. 无用户指针在内核未校验下被解引用（v6.1）。
+2. 无可写映射可执行、无可执行映射可写（v6.0 分页后的持续不变量）。
+3. 每次能力门控操作在执行 I/O 前都检查权限位。
+4. 每次系统调用对畸形参数返回类型化错误，绝不因用户输入 panic。
+5. 相同提交 + 锁定工具链重建产生逐字节一致的内核镜像。
+6. PMM 不重复发放同一物理页；调试构建检测二次释放。
+7. 堆分配器在调试构建检测二次释放与 canary 破坏。
+8. 任一用户态服务的故障不能拖垮内核（v6.2）。
 
-Include: affected version/commit, a description of the issue, reproduction
-steps or a minimal image/trace, your assessment of impact, and whether you
-want credit.
+---
 
-### 7.1 Our commitments
+## 7. 负责任披露
 
-| Stage | Target |
+如发现漏洞，请**勿**公开开 issue。二选一：
+
+1. **GitHub Security Advisory**（仓库 Security → Advisories → Report a vulnerability，首选）。
+2. 若不可用，联系维护者私人地址，主题标注 `[ZENITHOS SECURITY]`。
+
+请包含：受影响版本/提交、问题描述、复现步骤或最小镜像/轨迹、影响评估、是否署名。
+
+### 承诺
+
+| 阶段 | 目标 |
 | --- | --- |
-| Acknowledgement | within 72 hours |
-| Triage and severity assessment | within 7 days |
-| Fix or documented mitigation | within 90 days for high/critical issues |
-| Public advisory | after the fix ships, coordinated with the reporter |
-| Credit | offered by name or handle unless you prefer anonymity |
+| 确认 | 72 小时内 |
+| 分诊与定级 | 7 天内 |
+| 修复或书面缓解 | 高/严重 90 天内 |
+| 公开公告 | 修复发布后，与上报者协调 |
+| 署名 | 按名/代号署名，除非要求匿名 |
 
-We will not pursue legal action against good-faith research, we will not
-require an NDA, and we will not ask you to stay silent after the fixed
-release is public. Please avoid privacy violations, data destruction, and
-denial-of-service testing against systems you do not own.
+对善意研究不追责、不要求 NDA、修复发布后不要求沉默。请勿越权、毁数据、或 DoS 非自有系统。
 
-### 7.2 Scope
+### 范围
 
-In scope: boot path, kernel modules, build pipeline, emulator harness, CI
-configuration, and documentation that makes security claims.
-
-Out of scope *for v1.0*: anything requiring userspace, networking, or storage
-(none exist), third-party toolchains (NASM, Node, QEMU, v86) unless the issue
-is in our integration, and social-engineering attacks.
+**在范围内：** 引导路径、内核模块、构建管线、模拟器 harness、CI、安全相关文档。
+**当前范围外：** 依赖用户态/网络/存储的能力（尚不存在）、第三方工具链（NASM/TCC/Node/v86）
+除非集成缺陷、社会工程。
 
 ---
 
-## 8. Responsible disclosure
-
-The policy above is the responsible-disclosure policy for the project. It is
-intentionally simple: private report, fast acknowledgement, coordinated fix,
-public credit. A formal advisory template and a security.txt file will be
-published with v1.1.
-
----
-
-## 9. Summary
-
-v1.0 is a **trusted single-address-space system** whose security story is
-honest: tiny attack surface, deterministic artifact, validated boot hand-off,
-diagnosable crashes — and no isolation whatsoever between components. That
-last fact is the single most important input to the v2.0 microkernel design.
-Anyone who needs containment, multi-user separation, or a hardened platform
-should not use v1.0; anyone who wants to understand how such a platform could
-be built incrementally is in the right place.
-
-*Security review status: documented v1.0, no external audit.*
+*安全评审状态：v6.0 架构与攻击面已文档化；隔离能力尚在里程碑推进，无外部审计。*

@@ -1,944 +1,440 @@
-# ZenithOS Architecture
+# ZenithOS 架构文档（Architecture）
 
-> **Status: v1.0 "Neural Core".** A 32-bit x86, single-address-space, ring-0
-> operating system booting from a raw 1.44 MB floppy image, rendering a
-> 320×200×256 neon neural desktop driven by an in-kernel spiking neural
-> network. This document describes **what the source actually does** — module
-> by module, with the real constants, addresses, and algorithms. Where a
-> capability is absent, it says so.
+> **状态：v6.0（重写进行中）。** 本文档描述 v6.0 的**目标架构**与已落地的事实：
+> 模块化混合内核、机制与策略分离、HAL 分层、四模块目录映射、物理内存映射、BootInfo ABI 与
+> 启动流程。凡当前工作树尚未实现的结构，均以「目标结构」标注，不冒充已完成事实。
+> 若本文与 `src/include/config.h` / `config.inc` 冲突，**以源码为准，且本文视为缺陷**。
 
-Related documents: [`README.md`](../README.md) for the overview,
-[`AI-NATIVE.md`](AI-NATIVE.md) for the model rationale,
-[`SECURITY.md`](SECURITY.md) for the threat model,
-[`TESTING.md`](TESTING.md) for verification.
+关联文档：[README.md](../README.md)、[ROADMAP.md](../ROADMAP.md)、
+[SECURITY.md](SECURITY.md)、[ECOSYSTEM.md](ECOSYSTEM.md)。
 
 ---
 
-## Table of contents
+## 目录
 
-- [1. System shape](#1-system-shape)
-- [2. Boot sequence](#2-boot-sequence)
-- [3. Physical memory map](#3-physical-memory-map)
-- [4. Module interfaces](#4-module-interfaces)
-- [5. Interrupt path](#5-interrupt-path)
-- [6. PIC and PIT](#6-pic-and-pit)
-- [7. Keyboard](#7-keyboard)
-- [8. Physical memory allocator (PMM)](#8-physical-memory-allocator-pmm)
-- [9. Kernel heap](#9-kernel-heap)
-- [10. The spiking neural network](#10-the-spiking-neural-network)
-- [11. Rendering pipeline](#11-rendering-pipeline)
-- [12. Palette and DAC](#12-palette-and-dac)
-- [13. Unified logging](#13-unified-logging)
-- [14. Panic path](#14-panic-path)
-- [15. System-call ABI](#15-system-call-abi)
-- [16. Boot self-tests](#16-boot-self-tests)
-- [17. Build pipeline](#17-build-pipeline)
-- [18. Headless verification harness](#18-headless-verification-harness)
-- [19. Determinism and invariants](#19-determinism-and-invariants)
-- [20. Source index](#20-source-index)
+- [1. 系统形态：模块化混合内核](#1-系统形态模块化混合内核)
+- [2. 机制与策略分离](#2-机制与策略分离)
+- [3. HAL 分层](#3-hal-分层)
+- [4. 四个模块到目录树的映射](#4-四个模块到目录树的映射)
+- [5. 物理内存映射](#5-物理内存映射)
+- [6. BootInfo ABI](#6-bootinfo-abi)
+- [7. 启动流程](#7-启动流程)
+- [8. 内核模块目录结构](#8-内核模块目录结构)
+- [9. 构建与链接](#9-构建与链接)
+- [10. 四角色工作区](#10-四角色工作区)
+- [11. 平台派生矩阵](#11-平台派生矩阵)
 
 ---
 
-## 1. System shape
+## 1. 系统形态：模块化混合内核
 
-| Property | v1.0 value |
+ZenithOS v6.0 是**模块化混合内核（hybrid/microkernel-forward）**：当前所有模块运行在 32 位
+保护模式单一地址空间、ring 0，但按「机制在内核、策略在配置、服务可迁出」的方式分层，为
+v6.1 的能力制进程模型与 v6.2 的微内核化服务预留边界。
+
+| 属性 | v6.0 值 |
 | --- | --- |
-| CPU mode | 32-bit protected mode, flat 4 GiB segments, ring 0 only |
-| Boot medium | raw 1.44 MB floppy image, LBA 0 = boot sector |
-| Boot sector | 512 bytes, real mode, ends in `0xAA55` |
-| Kernel load | physical `0x10000`, 120 CHS sectors = 61,440 bytes max |
-| Video | VGA mode 13h, 320×200, 256 colours, framebuffer `0xA0000` |
-| Display buffer | 64,000-byte off-screen back buffer at `0x20000` |
-| Timer | 8254 PIT channel 0, 100 Hz, divisor 11,932 |
-| Input | 8042 keyboard controller, IRQ1, scancode set 1 |
-| Serial | COM1 (`0x3F8`), 115,200 8N1, polled output |
-| Clock | CMOS RTC, read-only |
-| AI | 24-neuron deterministic spiking network in kernel space |
-| Memory | E820-driven 4 KiB page bitmap + static free-list heap |
-| Userspace | **none** (no ring 3, no paging, no processes) |
-| Dependencies | zero at runtime; Node + NASM at build time only |
+| CPU 模式 | 32 位保护模式，平坦 4 GiB 段（代码 `0x08` / 数据 `0x10`），ring 0 |
+| 内核组成 | C（TCC）+ ASM（NASM），ELF32 对象由 GNU `ld` 链接、`objcopy -O binary` 平坦化为 `kernel.bin` |
+| 引导介质 | 原始 1.44 MB 软盘镜像，LBA 0 = 512 字节引导扇区 |
+| 内核加载 | 物理 `0x10000`（`KERNEL_ORG`），120 扇区 = 61,440 字节上限 |
+| 内存 | 位图 PMM（4 KiB 页）+ 分页（恒等映射）+ 静态内核堆 |
+| 显示 | VGA 模式 13h，320×200×256，双缓冲（`0x20000` → `0xA0000`） |
+| 引导抽象 | `BootInfo.boot_type`：BIOS=`0`（已实现）/ UEFI=`1`（接口） |
+| 架构抽象 | x86_32（已实现）/ arm64（接口） |
+| 用户态 | 无（v6.1 能力制进程模型引入） |
+| 构建依赖 | Node 18+ + NASM 2.13+ + TCC 0.9.27 i386，OS 构建零 npm |
 
-`src/include/config.inc` is the single source of truth for every address and
-constant shared between the boot sector and the kernel. Both `boot.asm` and
-`src/kernel.asm` include it, which is how the loader and the kernel are kept
-from drifting apart.
+混合内核的目标不是「大一统」，而是**把可交换性做进结构**：驱动、子系统、乃至整个协议栈都可以
+在后续版本迁出内核而不改变其调用契约（见 §2 与 `docs/SECURITY.md` §驱动隔离）。
 
-### 1.1 Kernel composition
+---
 
-`src/kernel.asm` is the only translation unit that is assembled into
-`kernel.bin`. It `%include`s every module in link order, then defines
-`kernel_entry`. Each module is *also* assembled separately by the build with
-`-DZENITH_OBJ_CHECK`, which forces every cross-module dependency to be
-declared in an `%ifdef` block. The include order is dependency order:
+## 2. 机制与策略分离
+
+ZenithOS 的核心纪律：**机制（mechanism）是可复用的原语，策略（policy）是让机制可配置的数据。**
+
+| 层次 | 机制（放哪里） | 策略（放哪里） |
+| --- | --- | --- |
+| 定时 | PIT/定时器驱动 `src/drivers/pit`，中断投递 `src/arch/x86_32/isr` | 频率 `PIT_HZ 100`、基准 `PIT_BASE 1193182` 在 `src/include/config.h` |
+| 分页 | 页目录/页表填充与 CR3 切换 `src/mm/paging` | 恒等映射范围 `IDENT_MAP_BYTES (16 MiB)`、页目录/页表地址在 `config.h` |
+| 内存分配 | 位图扫描/置位 `src/mm/pmm` | 位图大小 `PMM_BITMAP_BYTES 16384`、可寻址上限（512 MiB）在 `config.h` |
+| 输出 | 帧缓冲/串口绘制原语 `src/drivers/{vga,serial}` | 输出路径选择 `video_mode`/`flags`（VGA/文本/串口/无头）在 `BootInfo` + `config.h` |
+| 特权指令 | 封装后的 `cli/sti/CRx/lgdt/lidt` 在 `src/hal/x86/cpu` | （后续）能力门控决定谁可调用，v6.1 引入 |
+
+规则：**任何常量、频率、映射范围、路径选择都不允许硬编码进机制实现**，必须收敛到
+`src/include/config.h`（C 侧）与 `src/include/config.inc`（汇编侧，二者镜像）或 `BootInfo`
+（启动期事实）。这是「一次编写，多设备派生」得以成立的前提。
+
+---
+
+## 3. HAL 分层
+
+硬件抽象层把「与具体 CPU/板级有关的字节」隔离在最小面内，向上暴露稳定接口。
 
 ```text
-lib/string  lib/fixed
-drivers/serial
-arch/gdt  arch/pic  arch/idt  arch/isr  arch/syscall  lib/panic
-drivers/pit  drivers/rtc  drivers/keyboard
-drivers/vga
-ui/font  ui/theme
-mm/pmm  mm/heap
-ai/snn
-lib/log  lib/selftest
-ui/neural
-kernel_entry (this file)
+  ┌─────────────────────────────────────────────────────────────┐
+  │                    内核 / 驱动 / UI                          │
+  │        （策略与业务，不含平台字节）                            │
+  ├─────────────────────────────────────────────────────────────┤
+  │  src/arch      架构层：GDT / IDT / ISR / PIC（x86_32）         │
+  │                 arm64 接口骨架（arch.h / README.md）          │
+  ├─────────────────────────────────────────────────────────────┤
+  │  src/hal       HAL：端口 I/O（outb/inb/...）+ CPU 控制        │
+  │                （cli/sti/hlt/rdtsc/CRx/invlpg/lgdt/lidt）     │
+  ├─────────────────────────────────────────────────────────────┤
+  │  src/drivers    设备驱动：VGA / serial / keyboard / pit /     │
+  │                rtc / device（经 HAL 访问寄存器）              │
+  ├─────────────────────────────────────────────────────────────┤
+  │  boot/bios      BIOS 引导（16 位） ；boot/uefi 接口骨架        │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-The flat image starts with a short `jmp kernel_entry` at offset 0 because the
-boot sector jumps to `KERNEL_ORG`, the first byte of the image; `kernel_entry`
-itself is placed after the modules so the file reads like a link map. This is an
-implementation detail, not a stable ABI.
+### 3.1 HAL 接口（已实现）
+
+`src/hal/x86/port.{h,asm}`：
+
+```c
+void     outb(uint16_t port, uint8_t value);
+uint8_t  inb(uint16_t port);
+void     outw(uint16_t port, uint16_t value);
+uint16_t inw(uint16_t port);
+void     outl(uint16_t port, uint32_t value);
+uint32_t inl(uint16_t port);
+void     io_wait(void);         /* out 0x80, al */
+```
+
+`src/hal/x86/cpu.{h,asm}`：
+
+```c
+void     cpu_cli(void);  void cpu_sti(void);  void cpu_hlt(void);
+uint64_t cpu_rdtsc(void);
+uint32_t cpu_read_cr0(void); uint32_t cpu_read_cr2(void); uint32_t cpu_read_cr3(void);
+void     cpu_write_cr0(uint32_t v); void cpu_write_cr3(uint32_t v);
+void     cpu_invlpg(uint32_t addr);
+void     cpu_lgdt(const void *gdtr); void cpu_lidt(const void *idtr);
+```
+
+`src/hal/hal.h` 聚合 `port.h` 与 `cpu.h`。**这一层面是能力门控的最小入口**：任何越过 HAL 直接
+`out`/`in`/改 `CRx` 的代码都违反分层，并会在 `docs/SECURITY.md` 的能力制路径中被拒之门。
+
+### 3.2 架构层（目标结构）
+
+`src/arch/arch.h`（入口）+ `src/arch/x86_32/{arch.h,gdt,idt,isr,pic}.{c,h,asm}`：
+GDT（平坦段）/ IDT（256 门）/ ISR（异常与 IRQ stub、分发、panic）/ PIC（8259 重映射与 EOI）。
+`src/arch/arm64/{arch.h,README.md}` 只定义接口与文档，**不参与 x86 构建**（见 `docs/ECOSYSTEM.md`）。
 
 ---
 
-## 2. Boot sequence
+## 4. 四个模块到目录树的映射
 
-The boot sector is 512 bytes of real-mode code, assembled with
-`nasm -f bin -I src/ boot.asm -o build/boot.bin`. It does **not** parse a
-filesystem: the image is raw, the kernel starts at LBA 1, and there is no BPB
-(its 59 bytes are spent on the E820 probe and the per-sector retry path).
+v6.0 把整个仓库划为四个模块。模块划分是**逻辑归属**，用于说明「哪些目录承载什么职责」，
+src 目录本身仍按 HAL/arch/mm/lib/drivers/kernel/ui 分层。
 
-| # | Step | Code | Details |
+### 模块一 · 底层（Core）
+
+内核自身的机制与入口。
+
+| 目录/文件 | 状态 | 职责 |
+| --- | --- | --- |
+| `boot/bios/boot.asm` | [已实现] | 512 字节 BIOS 引导（§7） |
+| `src/include/` | [已实现] | 自由站立头文件 + ABI：`zenith.h, config.h, config.inc, bootinfo.h, stdint.h, stddef.h, stdbool.h, stdarg.h` |
+| `src/mm/` | [已编译·未接线] | `mm.h, pmm, paging, heap`：4 KiB 位图分配器、恒等映射分页、内核堆 |
+| `src/lib/` | [已实现] / [已编译·未接线] | `string`（运行中）/ `math, fmt, log, panic`（已链接未调用） |
+| `src/kernel/` | [已实现] / [目标架构] | `startup.asm, kernel_main.c`（运行中）/ `console, sysinfo`（未创建） |
+
+### 模块二 · 多设备（Hardware）
+
+跨设备一致的硬件访问与平台派生。
+
+| 目录/文件 | 状态 | 职责 |
+| --- | --- | --- |
+| `src/hal/` | [已实现] | `hal.h, hal/x86/{port,cpu}.{h,asm}`：端口 I/O、CPU 控制 |
+| `src/arch/` | [已编译·未接线] / [接口骨架] | `arch/x86_32/*`（GDT/IDT/ISR/PIC 已链接未调用）/ `arch/arm64/*` |
+| `src/drivers/` | [已实现] / [已编译·未接线] | `vga, serial`（运行中）/ `keyboard, pit, rtc, device`（已链接未调用） |
+| `boot/uefi/` | [接口骨架] | UEFI 移交规范接口骨架（§11） |
+
+### 模块三 · 桌面（Desktop）
+
+用户环境与四角色工作区。
+
+| 目录/文件 | 状态 | 职责 |
+| --- | --- | --- |
+| `src/ui/font` | [已编译·未接线] | 5×7 位图字体（已链接，UI 层未绘制） |
+| `src/ui/theme` | [目标架构] | 调色板与主题 |
+| `src/ui/desktop` | [目标架构] | GUI 桌面 |
+| `src/ui/terminal` | [目标架构] | 硬核终端（开发者模式） |
+| `src/ui/roles` | [目标架构] | 角色/无障碍/管理面板 |
+| `src/ui/scene3d` | [目标架构] | 3D 线框视觉（创作者模式） |
+
+### 模块四 · 生态（Ecosystem）
+
+构建、验证、治理与配套。
+
+| 目录/文件 | 状态 | 职责 |
+| --- | --- | --- |
+| `build.js` | [已实现] | 多目标编译 + GNU `ld`/`objcopy` 链接 + 镜像打包 + 校验 |
+| `tools/` | [已实现] | `emulate.mjs`（v86 无头验证）、`lib/png.mjs`（无依赖 PNG） |
+| `docs/` | [已实现] | ARCHITECTURE / SECURITY / ECOSYSTEM / ROADMAP 等 |
+| `.github/workflows/` | [已实现] | CI（构建 + 校验 + v86 视觉回归） |
+
+---
+
+## 5. 物理内存映射
+
+唯一事实来源：`src/include/config.inc` 与 `src/include/config.h`（镜像）。引导器与内核共享，
+以防漂移。以下均在物理 32 位地址空间、1 MiB 以下静态分配。
+
+| 地址 | 大小 | 常量 | 用途 |
 | --- | --- | --- | --- |
-| 1 | Firmware loads LBA 0 | — | BIOS copies the sector to `0000:7C00` and jumps to it |
-| 2 | Real-mode setup | `boot_main` | `CLI`, `DS=ES=SS=0`, `SP=0x7C00`, `CLD`, save `DL` (boot drive) |
-| 3 | A20 enable | `enable_a20` | Test first; then BIOS `INT 15h AX=2401h`; then fast A20 (port `0x92` bit 1). Each attempt is verified by the `0x100500` vs `0x000500` alias test |
-| 4 | E820 probe | `e820_probe` | `INT 15h EAX=E820 EDX='SMAP' ECX=24`, up to 8 entries written to `0x0510`, count stored at `0x0506`, magic/version at `0x0500`/`0x0504` |
-| 5 | Kernel load | `load_kernel` | One 512-byte sector per `INT 13h AH=02h` call into `ES = KERNEL_ORG>>4`, `BX = dest_off`; walk cylinder 0/head 0/sector 2 → sector 18, then head 1, then next cylinder; 3 attempts per sector with controller reset between failures |
-| 6 | VGA mode | `boot_main` | `INT 10h AX=0013h` — mode 13h selected **before** leaving real mode, so no BIOS call is ever needed in 32-bit code |
-| 7 | Boot info | `boot_main` | Rewrite `[0x0500]=0x4F4E455A` ('ZENO'), `[0x0504]=1`, `[0x0508]=boot_drive` (the E820 count at `+6` survives from step 4) |
-| 8 | Protected mode | `boot_main` | `CLI`, `LGDT`, set `CR0.PE`, far jump `0x08:pm_entry` |
-| 9 | 32-bit trampoline | `pm_entry` | Load `DS/ES/FS/GS/SS = 0x10`, `ESP = KERNEL_STACK_TOP (0x9F000)`, `EBP = 0`, `EBX = 0x0500`, `EAX = 0x10000`, `JMP EAX` |
-| 10 | Kernel entry | `kernel_entry` | `CLI`, `CLD`, stack reset, then the init sequence below |
-
-### 2.1 Kernel init order
-
-`kernel_entry` runs a fixed sequence; a failure in the early phases leaves
-interrupts disabled, so no half-initialised handler can fire.
+| `0x00000500` | 592 字节 | `BOOTINFO_ADDR` | `BootInfo`：16 字节头 + ≤24×24 字节 E820 描述符 |
+| `0x00010000` | 60 KiB | `KERNEL_ORG`, `KERNEL_SECTORS 120` | `kernel.bin` 加载地址，120 扇区窗口 |
+| `0x00020000` | 64,000 字节 | `VGA_BACKBUF` | VGA 双缓冲（320×200） |
+| `0x00030000` | 16 KiB | `PMM_BITMAP_ADDR` | PMM 位图：131,072 × 4 KiB = 512 MiB |
+| `0x00034000` | → `0x00070000` | `HEAP_START`…`HEAP_END` | 内核堆（≈240 KiB，末字节 `0x6FFFF`，区间右开） |
+| `0x00070000` | 4 KiB | —（保留） | **隔离保护页**：堆与分页结构之间的死区，任何分配器都不得越过 |
+| `0x00071000` | 4 KiB | `PAGE_DIR_ADDR` | 页目录 |
+| `0x00072000` | 16 KiB | `PAGE_TABLES_ADDR` | 页表：恒等映射前 16 MiB（`IDENT_MAP_BYTES`） |
+| `0x0009F000` | 向下增长 | `KERNEL_STACK_TOP` | 内核栈顶 |
+| `0x000A0000` | 64,000 字节 | `VGA_FB` | VGA 线性帧缓冲（模式 13h，320×200×256） |
 
 ```text
-CLI, CLD, ESP=0x9F000, EBP=0
-serial_init            COM1 115200 8N1, FIFO, polled TX
-log_init               ring buffer + boot banner
-gdt_init               reload kernel GDT (null / code 0x08 / data 0x10)
-pmm_init               E820 -> physical page bitmap
-heap_init              one free block over HEAP_START..HEAP_END
-pic_init               remap 8259 to 0x20/0x28, mask all lines
-idt_init               256 gates (exceptions 0..31, IRQs 32..47, default stub)
-syscall_init           install INT 0x80 gate (DPL 3)
-pit_init               8254 channel 0, 100 Hz
-pic_unmask(0)          enable the timer IRQ line only
-rtc_init               read CMOS time once
-keyboard_init          clear state, unmask IRQ1
-snn_init               zero state, generate weight matrix from fixed seed
-theme_init             upload 256-entry palette to the DAC
-vga_init               clear back buffer, present an empty frame
-ui_init                reset frame-pacing state
-STI                    interrupts are now legal
-selftest_run           10 boot checks, results to log/HUD
-main loop              ui_frame(); forever
+ 0x000000  ┌──────────────────┐
+           │ IVT / BDA（启动后弃用）│
+ 0x000500  │ BootInfo（592 B）  │
+ 0x0007C00 │ 引导扇区（瞬态）      │
+ 0x0010000 │ kernel.bin（≤60 KiB）│
+ 0x0020000 │ VGA 双缓冲（64,000 B）│
+ 0x0030000 │ PMM 位图（16 KiB）   │
+ 0x0034000 │ 内核堆（≈240 KiB）   │
+ 0x0070000 │ 隔离保护页（死区）   │
+ 0x0071000 │ 页目录（4 KiB）      │
+ 0x0072000 │ 页表（16 KiB，恒等 16 MiB）│
+ 0x009F000 │ 内核栈顶（向下）      │
+ 0x00A0000 │ VGA 帧缓冲（模式 13h）│
+ 0x00F0000 + BIOS ROM / 固件 MMIO（不触碰）│
 ```
 
-Boot log lines (COM1 + ring buffer), in order:
-
-```text
-[INFO ] logger online: unified serial + ring buffer
-[INFO ] ZenithOS v1.0 kernel entered (protected mode, flat segments)
-[INFO ] arch: GDT reloaded, flat 4 GiB ring-0 segments
-[INFO ] mm: physical page allocator armed from E820
-[INFO ] mm: kernel heap free-list online
-[INFO ] arch: IDT + PIC remapped to 0x20/0x28, exceptions gated
-[INFO ] drivers: PIT 100 Hz, IRQ1 keyboard, CMOS RTC
-[INFO ] ai: 24-neuron spiking network online
-[INFO ] video: VGA mode 13h back-buffered 320x200x256
-[INFO ] ui: neon neural core renderer initialised
-[INFO ] kernel: interrupts enabled, perception loop running
-[INFO ] selftest: starting 10 checks
-...      (one line per check)
-[INFO ] selftest: complete
-[INFO ] ZenithOS v1.0 boot complete
-```
+> 内核加载到 `0x10000` 而非 `0x1000`，因为引导扇区仍在 `0x7C00` 执行，60 KiB 窗口不能覆盖
+> 它；`0x10000` 使整段窗口安全落在引导扇区之上、双缓冲之下。PMM 仅分配 1 MiB 以上的帧，
+> 内核自身结构位于保留的低 1 MiB 窗内。
 
 ---
 
-## 3. Physical memory map
+## 6. BootInfo ABI
 
-Everything below 1 MiB is statically assigned. The PMM only ever allocates
-frames at or above 1 MiB; the kernel's own data structures live in the low
-1 MiB window reserved by construction.
+`struct BootInfo`（`packed`，定义于 `src/include/bootinfo.h`）是引导器 → 内核的稳定移交契约，
+由 BIOS 引导（16 位）写入，`kernel_main`（32 位 C）读取；UEFI（64 位）路径写入同一结构。
 
-| Range | Size | Owner / use |
-| --- | --- | --- |
-| `0x000000–0x0003FF` | 1 KiB | Real-mode IVT (dead after boot) |
-| `0x000400–0x0004FF` | 256 B | BIOS data area (dead after boot) |
-| `0x000500–0x00050F` | 16 B | Boot-info block: `+0` magic `ZENO`, `+4` version 1, `+6` E820 count (u16), `+8` boot drive (u8) |
-| `0x000510–0x0005CF` | 192 B | E820 entries, max 8 × 24 B |
-| `0x0007C00–0x0007DFF` | 512 B | Boot sector while executing (dead afterward) |
-| `0x0010000–0x001EFFF` | 60 KiB | Flat kernel image (`KERNEL_ORG`), 61,440-byte hard budget |
-| `0x0020000–0x002F9FF` | 64,000 B | VGA back buffer (`VGA_BACKBUF`) |
-| `0x0030000–0x0033FFF` | 16 KiB | PMM bitmap: 131,072 frames × 4 KiB = 512 MiB tracked |
-| `0x0034000–0x006FFFF` | ~304 KiB | Kernel heap arena (`HEAP_START`..`HEAP_END`) |
-| `0x0070000` | — | `AI_SCRATCH` base |
-| `0x0074000` | — | `UI_SCRATCH` base |
-| `0x009F000` | — | Kernel stack top (`KERNEL_STACK_TOP`, grows down) |
-| `0x00A0000–0x00AF9FF` | 64,000 B | VGA mode 13h framebuffer (`VGA_FB`) |
-| `0x00F0000+` | — | BIOS ROM / firmware MMIO (untouched) |
+固定头 16 字节，其后跟 E820 描述符表：
 
-```text
- 0x000000  +--------------------------+
-           | IVT / BDA / bootinfo     |
- 0x0007C00 | boot sector (transient)  |
- 0x0010000 | kernel image (<= 60 KiB) |
- 0x0020000 | back buffer (64,000 B)   |
- 0x0030000 | PMM bitmap (16 KiB)      |
- 0x0034000 | heap arena (~304 KiB)    |
- 0x0070000 | AI scratch               |
- 0x0074000 | UI scratch               |
- 0x009F000 | stack top (grows down)   |
- 0x00A0000 | VGA framebuffer          |
- 0x00F0000 | BIOS ROM                 |
-           +--------------------------+
-```
-
-The kernel is loaded at `0x10000` rather than `0x1000` for a concrete reason:
-the boot sector is still executing at `0x7C00`, and a 60 KiB window starting at
-`0x1000` would overwrite the running boot sector. `0x10000` puts the whole
-window safely above the boot sector and below the back buffer.
-
----
-
-## 4. Module interfaces
-
-The table lists the public entry points and the data that crosses module
-boundaries. Assembly has no headers; the contract *is* the register/`extern`
-documentation at the top of each file. The build's `-DZENITH_OBJ_CHECK` pass
-makes every `extern` explicit.
-
-### 4.1 `src/arch/gdt.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `gdt_init` | Loads the kernel GDT and reloads `CS` via far jump; sets `DS/ES/FS/GS/SS = 0x10` |
-| `gdt_start` | Base of the 3-descriptor table; used by the GDT self-test (`sgdt` base and limit 23) |
-
-Descriptors: null (`0x00`), flat code (`0x08`, present, ring 0, `0xCF`
-granularity/limit), flat data (`0x10`). No TSS — there is no ring 3.
-
-### 4.2 `src/arch/idt.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `idt_init` | Fills 256 gates with `isr_unused`, then installs 48 stubs from `isr_stub_table`, then `LIDT` |
-| `idt_set_gate` | `EAX=vector`, `EBX=handler`, `ECX=attributes` — used by the syscall layer to install vector `0x80` with `0xEE00` (present, DPL 3, 32-bit interrupt gate) |
-| `idt_table` | 256 × 8-byte gates; IDT limit is 2047 |
-
-### 4.3 `src/arch/isr.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `isr_0..isr_31` | Exception stubs; push synthetic error code where the CPU does not, then vector number, then join `isr_common` |
-| `irq_0..irq_15` | IRQ stubs for vectors 32..47 |
-| `isr_stub_table` | 48 dwords consumed by `idt_init` |
-| `irq_handler_table` | 16 dwords; entry 0 = `pit_irq_handler`, entry 1 = `kbd_irq_handler`, others = `irq_default_handler` |
-
-`isr_common` builds a uniform trap frame (`PUSHA`, then `DS/ES/FS/GS`), loads
-kernel data selectors, and dispatches:
-
-- vector `< 32` → `exception_panic(vector, error, EIP)` (never returns);
-- vector `32..47` → `irq_dispatch` → handler → `pic_send_eoi(irq)`;
-- any other vector → return quietly.
-
-### 4.4 `src/arch/pic.asm`
-
-`pic_init` remaps the pair to `0x20`/`0x28` and masks everything.
-`pic_unmask(irq)` / `pic_mask(irq)` handle the cascade line automatically;
-`pic_send_eoi(irq)` acknowledges slave then master; `pic_mask_all` re-masks.
-
-### 4.5 `src/arch/syscall.asm`
-
-`syscall_init` installs the DPL-3 `INT 0x80` gate; `syscall_entry` preserves
-registers, dispatches on `EAX`, stores the return value, and `IRET`s. See
-[§15](#15-system-call-abi).
-
-### 4.6 `src/drivers/pit.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `pit_init` | Channel 0, mode 3, divisor `1193182/100 = 11932`; zeroes `pit_ticks` |
-| `pit_irq_handler` | IRQ0: `inc dword [pit_ticks]`; minimal by design |
-| `pit_uptime_ms` | `pit_ticks * 10` |
-| `pit_ticks` | Monotonic 32-bit tick counter at 100 Hz |
-
-### 4.7 `src/drivers/serial.asm`
-
-`serial_init` programs COM1 to 115,200 8N1 with FIFO enabled, interrupts
-disabled, DTR/RTS asserted. `serial_putc` polls the transmitter-empty bit with
-a bounded spin (`0x10000` iterations) so a missing UART cannot wedge the
-kernel. `serial_puts` walks a NUL-terminated string.
-
-### 4.8 `src/drivers/keyboard.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `kbd_init` | Clears state and unmasks IRQ1 |
-| `kbd_irq_handler` | Reads port `0x60`, tracks the `0xE0` prefix, maps scancode set 1, sets/clears the held bit, pushes make events into the ring |
-| `kbd_poll` | `EAX = 0x100 | logical key`, or `0` when empty |
-| `kbd_held_mask` | Bit `N` set while logical key `N` is held (see `KEY_*` in `config.inc`) |
-| `kbd_scan_count` | Diagnostics counter |
-
-Ring size `KBD_BUF_SIZE = 64` (power of two); overwrite-oldest on overflow.
-
-### 4.9 `src/drivers/vga.asm`
-
-All drawing targets the back buffer at `0x20000`; only `vga_present` touches
-the aperture. Primitives: `vga_clear`, `vga_clear_dither`, `vga_putpixel`,
-`vga_hline`, `vga_vline`, `vga_fill_rect`, `vga_line` (Bresenham, per-pixel
-clipped), `vga_draw_char`, `vga_draw_char_big` (2×), `vga_draw_text`,
-`vga_draw_text_big`, `vga_set_palette` (RGB 0..63 triples), `vga_present`
-(`rep movsd` of 64,000 bytes), `vga_wait_vsync` (bounded poll of port `0x3DA`
-bit 3).
-
-Text is drawn from the 5×7 font: 5 column bytes per glyph, bit 0 = top row,
-advance 6 px (12 px for 2×).
-
-### 4.10 `src/drivers/rtc.asm`
-
-`rtc_init` reads CMOS status B and the time once. `rtc_read_time` waits
-(bounded) for the update-in-progress bit to clear, latches second/minute/hour/
-day/month/year, converts packed BCD unless status B says binary, and
-normalises 12-hour PM/AM to 24-hour. The kernel never writes the RTC.
-
-### 4.11 `src/mm/pmm.asm`
-
-| Symbol | Contract |
-| --- | --- |
-| `pmm_init` | Mark all frames used; free E820 type-1 ranges ≥ 1 MiB (capped at 512 MiB); fallback = 32 MiB if the map is missing |
-| `pmm_alloc_page` | Returns a 4 KiB-aligned physical address, or `0`; scans from a hint, wraps once |
-| `pmm_free_page` | Frees a page; ignores double-free and out-of-range addresses |
-| `pmm_free_pages`, `pmm_total_pages`, `pmm_usable_kb`, `pmm_free_kb` | Statistics |
-
-### 4.12 `src/mm/heap.asm`
-
-First-fit free list over `HEAP_START..HEAP_END`, 8-byte aligned; header is
-`{u32 size|alloc_bit, u32 next}`; splitting when the remainder ≥ 16 bytes;
-forward and backward coalescing on free. API: `heap_init`, `kmalloc`,
-`kfree`, `heap_free_bytes`, `heap_used_bytes`.
-
-### 4.13 `src/ai/snn.asm`
-
-`snn_init`, `snn_tick`, `snn_stimulate(index)`; state `snn_activation[24]`,
-`snn_spiked[24]`, `snn_weights[576]`, `snn_spike_count`,
-`snn_spikes_this_tick`, `snn_energy`. See [§10](#10-the-spiking-neural-network).
-
-### 4.14 `src/ui/theme.asm`
-
-`theme_init` uploads the 256-entry generated palette (768 bytes of RGB 0..63)
-to the DAC via `vga_set_palette`. Slots 0..15 are stable so the panic screen is
-readable regardless of init order; slots 16..191 are neon ramps
-(`RAMP_NODE`, `RAMP_EDGE`, `RAMP_GRID`, `RAMP_UI`, `RAMP_LOG`, `RAMP_GREEN`,
-`RAMP_AMBER`, `RAMP_RED`, `RAMP_BG`).
-
-### 4.15 `src/lib/*` and `src/ui/*`
-
-| Module | Provides |
-| --- | --- |
-| `lib/string.asm` | `str_len`, `mem_copy`, `mem_set`, `mem_zero`, `u32_to_dec`, `u32_to_dec_pad`, `u32_to_hex` |
-| `lib/fixed.asm` | `fsin`, `fcos` (Q8.8 via generated table), `fmul_q8`, `sat_u8`, `abs_i32`, `clamp_i32` |
-| `lib/log.asm` | `log_init`, `log_info`, `log_warn`, `log_error`, `log_str`; ring state (`log_*`) |
-| `lib/panic.asm` | `exception_panic`, exception name table |
-| `lib/selftest.asm` | `selftest_run`, `selftest_passed`, `selftest_total` |
-| `ui/font.asm` | `font_5x7`: 95 glyphs × 5 bytes, ASCII 32..126 |
-| `ui/neural.asm` | `ui_init`, `ui_frame` and the desktop renderer |
-
----
-
-## 5. Interrupt path
-
-### 5.1 Trap frame layout
-
-`isr_common` runs with the stack looking like this (low addresses at the top):
-
-```text
-  [ GS ][ FS ][ ES ][ DS ][ EDI..EAX (PUSHA) ][ vector ][ error ][ EIP ][ CS ][ EFLAGS ]
-       ^ pushed by isr_common                     ^ pushed by the stub / CPU
-```
-
-- `[esp + 48]` = vector
-- `[esp + 52]` = error code
-- `[esp + 56]` = faulting `EIP`
-
-The exception path passes `(vector, error, EIP)` to `exception_panic`; the IRQ
-path calls the registered handler and then sends EOI. Unused gates point at
-`isr_unused`, which pushes vector `0xFFFF` and returns.
-
-### 5.2 Flow
-
-```text
-  hardware IRQ (PIC) ──> IDT gate (DPL0 interrupt gate) ──> irq_N stub
-                                                      │
-                                                      v
-                                              isr_common (PUSHA, segments, CLD)
-                                                      │
-                              vector 32..47 ──> irq_dispatch
-                                                      │  handler = table[vector-32]
-                                                      │  call handler
-                                                      │  pic_send_eoi(irq)
-                                                      v
-                                              IRETD (restores frame)
-
-  CPU exception ──> IDT gate ──> isr_N stub ──> isr_common ──> exception_panic
-                                                              (never returns)
-```
-
-Because the dispatcher sends the EOI, drivers never touch the PIC. Because the
-kernel runs one main loop with interrupts enabled, timer and keyboard events
-preempt rendering — the desktop is interrupt-driven, not polled.
-
----
-
-## 6. PIC and PIT
-
-### 6.1 8259 remap
-
-The BIOS leaves IRQ0..7 at vectors `0x08..0x0F`, colliding with CPU
-exceptions. `pic_init` issues the standard ICW1–ICW4 sequence:
-
-| ICW | Master (`0x20`/`0x21`) | Slave (`0xA0`/`0xA1`) |
-| --- | --- | --- |
-| ICW1 | `0x11` — edge, cascade, ICW4 | `0x11` |
-| ICW2 | `0x20` — vector base | `0x28` |
-| ICW3 | `0x04` — slave on IRQ2 | `0x02` — cascade identity |
-| ICW4 | `0x01` — 8086 mode | `0x01` |
-| masks | `0xFF` | `0xFF` |
-
-Drivers unmask only the lines they own: IRQ0 (PIT) and IRQ1 (keyboard). IRQ2 is
-unmasked automatically when a slave line is used.
-
-### 6.2 8254 PIT
-
-- Channel 0, command `0x36` (lobyte/hibyte, mode 3, binary).
-- Divisor `1193182 / 100 = 11932` → 100.00 Hz (programmed value truncates, so
-  the actual rate is 100.0027 Hz; the kernel reasons in ticks, never in
-  seconds).
-- `pit_ticks` is the only clock. Uptime = `ticks × 10 ms`; the HUD also derives
-  `T+MM:SS` from it.
-
----
-
-## 7. Keyboard
-
-Scancode set 1 (XT-compatible). The handler:
-
-1. reads port `0x60`;
-2. if the previous byte was `0xE0`, clears the prefix and maps the extended
-   code (arrow keys);
-3. otherwise masks bit 7 to get the make code and maps it (`W=0x11`,
-   `A=0x1E`, `S=0x1F`, `D=0x20`, `Q=0x10`, `E=0x12`, `R=0x13`,
-   `Space=0x39`, `Esc=0x01`, `Enter=0x1C`, `C=0x2E`);
-4. sets or clears `kbd_held_mask` bit for the logical key;
-5. on a make code, pushes the key into the 64-entry ring.
-
-`ui_input` drains the ring each frame. `W/A/S/D` stimulate SNN neurons 0–3,
-`Q`/`E` stimulate 4/5, `Space` stimulates 7 (each `+96`, saturating), so
-keyboard input genuinely enters the network. Held keys are also available to
-the camera through `kbd_held_mask`.
-
----
-
-## 8. Physical memory allocator (PMM)
-
-- One bit per 4 KiB frame, `PMM_BITMAP_ADDR = 0x30000`, 16 KiB →
-  `PMM_MAX_PAGES = 131,072` frames → **512 MiB** tracked.
-- `pmm_init` marks **all** frames used, then parses the E820 map captured at
-  `0x0510`:
-  - only type `1` (usable) entries are considered;
-  - regions with a non-zero high dword (≥ 4 GiB) are skipped;
-  - lengths are capped at the bitmap's 512 MiB reach;
-  - everything below 1 MiB is force-reserved (`LOW_PAGE = 256`);
-  - each surviving range is rounded inward to page boundaries and its bits
-    cleared.
-- If the boot magic is missing or the entry count is zero, a conservative
-  32 MiB fallback is freed.
-- `pmm_alloc_page` scans from `pmm_hint`, wraps to `LOW_PAGE` once, and returns
-  a `page << 12` address or `0` on exhaustion.
-- `pmm_free_page` ignores addresses below 1 MiB, out of range, or already free
-  (double-free is a no-op).
-
-The allocator is **not used by the desktop** in v1.0 (all UI state is static or
-heap-allocated); it exists, is self-tested, and is the substrate for future
-drivers and userspace.
-
----
-
-## 9. Kernel heap
-
-- Arena: `HEAP_START (0x34000)` .. `HEAP_END (0x70000)`, ≈ 304 KiB.
-- `heap_init` creates one free block covering the arena minus one header.
-- Block layout:
-
-```text
-  +------------------------+  <- block address (returned pointer - 8)
-  | size | allocated bit   |   u32, low bit = allocated, size multiple of 8
-  +------------------------+
-  | next free/alloc block  |   u32 absolute address (0 = end)
-  +------------------------+  <- pointer returned by kmalloc
-  | payload ...            |
-  +------------------------+
-```
-
-- `kmalloc`: rounds up to 8 bytes, walks the free list first-fit, splits when
-  the remainder can hold a header plus ≥ 8 bytes of payload (`MIN_SPLIT = 16`).
-- `kfree`: marks the block free, coalesces forward and backward when the
-  neighbour is physically adjacent and free; double-free is detected (allocated
-  bit already clear) and ignored.
-- `heap_free_bytes` walks the list; `heap_used_bytes` returns the running
-  counter. Both are displayed by the HUD/self-test.
-
-The heap is deliberately separate from the PMM: the PMM owns physical frames
-above 1 MiB for future use; the heap gives the kernel a simple, bounded arena
-today.
-
----
-
-## 10. The spiking neural network
-
-`src/ai/snn.asm` implements a deterministic, integer-only leaky
-integrate-and-fire network. It is the AI-native heart of the desktop: the
-renderer reads its state every frame.
-
-### 10.1 State
-
-| Symbol | Type | Meaning |
-| --- | --- | --- |
-| `snn_activation[24]` | u8 | activation (membrane potential surrogate), 0..255 |
-| `snn_spiked[24]` | u8 | spike flags for the current tick |
-| `snn_weights[576]` | u8 | excitatory weight matrix `W[pre][post]`, 0..40 |
-| `snn_random` | u32 | xorshift32 state, seeded `0x13579BDF` |
-| `snn_spike_count` | u32 | total spikes since boot |
-| `snn_spikes_this_tick` | u32 | spikes on the last tick |
-| `snn_energy` | u32 | `sum(activation)`, 0..6120 |
-
-### 10.2 Weight generation
-
-`snn_init` fills `W` with a fixed xorshift32 sequence. For each of the 576
-entries:
-
-```text
-r = xorshift32()
-weight = min(r & 0x3F, 40)
-if (r & 0xC0) == 0: weight = 0     ; ~25% of synapses absent
-W[i] = weight
-```
-
-The matrix is therefore sparse (≈ 75% non-zero) and fully deterministic.
-
-### 10.3 Per-tick update
-
-`snn_tick` runs once per PIT tick (the UI may run up to 4 catch-up ticks if it
-falls behind):
-
-```text
-1. clear spiked[]
-2. for each neuron: a -= a >> 3          (12.5% leak per tick)
-3. ambient stimulus:
-     r = xorshift32()
-     if (r & 7) == 0:
-         target = r mod 24
-         a[target] = min(a[target] + 72, 255)
-4. for i in 0..23:
-     if a[i] >= 192:
-         a[i] = 0
-         spiked[i] = 1
-         spike_count++; spikes_this_tick++
-         for j in 0..23:
-             if W[i][j] != 0:
-                 a[j] = min(a[j] + W[i][j], 255)
-5. energy = sum(a)
-```
-
-`snnt_stimulate(index)` adds 96 (saturating) and is called by the UI for
-`W/A/S/D/Q/E/Space` key events. All arithmetic is unsigned 8-bit with
-saturating clamps; the energy sum is 32-bit. There is no floating point, no
-allocation, and no wall-clock dependency.
-
-### 10.4 Why these choices
-
-- **One byte per neuron** keeps the whole model in 624 bytes of state and makes
-  HUD rendering a shift-and-scale operation.
-- **Saturating adds** mean no input sequence can overflow state or fault the
-  kernel.
-- **Fixed seed** means the desktop is reproducible: the same build produces the
-  same spike trains for the same input timeline.
-- **No inhibition/refractory** keeps the dynamics lively at 100 Hz; the leak
-  provides the only decay.
-
----
-
-## 11. Rendering pipeline
-
-The desktop is a 320×200 indexed-colour scene rendered entirely by the kernel
-into the back buffer, then blitted to the VGA aperture. Rendering is paced by
-the 100 Hz timer: `ui_frame` runs at most once per tick.
-
-### 11.1 Frame loop
-
-```text
-ui_frame:
-    ui_input        drain keyboard ring -> camera + SNN stimulus
-    ui_ai_step      advance SNN once per elapsed tick (max 4 catch-up ticks)
-    ui_draw         compose the scene into the back buffer
-    vga_present     rep movsd 64,000 bytes -> 0xA0000
-    ui_wait_tick    spin until pit_ticks advances (pacing)
-```
-
-Because the loop waits for the next heartbeat after presenting, the desktop is
-locked to the timer rather than running free; if a frame overruns, the wait
-returns immediately and the SNN catches up by at most 4 ticks.
-
-### 11.2 Camera
-
-| Input | Effect | Speed / limits |
-| --- | --- | --- |
-| `W` / `S` | dolly in / out | `ui_zoom ∓ 3` per frame; clamped 130..560; default 240 |
-| `A` / `D` | yaw | `ui_yaw ∓ 96` per frame; ×3 with `Space` |
-| `Q` / `E` | pitch | `ui_pitch ± 64` per frame; ×2 with `Space`; clamped ±6000 |
-| `R` | reset | yaw = 0, pitch = 0, zoom = 240, auto = on |
-| `C` | toggle cinematic auto-rotation | — |
-| `Space` | boost | multiplies yaw/pitch sensitivity for held keys |
-| `↑` / `↓` | dolly in / out (mirror of W/S) | same as W/S |
-| `←` / `→` | yaw (mirror of A/D) | same as A/D |
-
-Camera angles are 16-bit binary radians (`0x0000..0xFFFF` = one turn); the top
-8 bits index the generated 256-entry Q8.8 sine/cosine table. All rotation is
-integer multiplication plus arithmetic shift, never floating point.
-
-With cinematic mode enabled (default) and no movement key held, `ui_yaw += 10`
-per frame. Touching any movement key clears `ui_auto`; `C` toggles it back on
-and `R` restores it. The pitch clamp of ±6000 units is roughly ±33°.
-
-### 11.3 Scene composition
-
-Per frame, in this exact order:
-
-1. **Projection** (`ui_project`): for each of the 24 model nodes, rotate by
-   yaw around Y, then pitch around X, add the Q8.8 zoom to the resulting
-   depth, cull anything with depth ≤ 10 px, and project:
-   `sx = 160 + (x*260)/depth`, `sy = 100 + (y*260)/depth` (`UI_FOV = 260`).
-2. **Depth sort** (`ui_sort_nodes`): insertion sort of the 24 node indices by
-   `ui_sz`, far to near (painter's algorithm).
-3. **Background** (`ui_draw_background`): `vga_clear_dither` alternates
-   `RAMP_BG+1` and `RAMP_BG+3` per row for a CRT texture.
-4. **Starfield** (`ui_draw_stars`): 72 stars generated once by xorshift32 with
-   seed `0xC0FFEE11`; each frame's colour advances through
-   `RAMP_UI+1 .. RAMP_UI+8` by `(phase + tick/8) & 7`.
-5. **Floor grid** (`ui_draw_grid`): horizontal lines at `y = 126, 134, … < 168`;
-   radial lines from the vanishing point `(160,112)` to the bottom edge at
-   `(k*40, 172)` for `k*40 < 320`; a horizon glow line at `y = 112`.
-6. **Edges** (`ui_draw_edges`): for each of the 40 edges with both endpoints
-   on-screen, compute an average-depth shade (`0..31`, near = bright), map it
-   into the edge ramp (`RAMP_EDGE+1 .. +31`), then draw a soft glow line
-   offset one pixel down in a darker ramp entry and a bright core line.
-7. **Packets** (`ui_draw_packets`): 12 bright 2×2 dots; edge index
-   `(tick/32 + k*7) mod 40`, interpolation `t = (tick*3 + k*29) & 255`,
-   colour pulsed through `RAMP_NODE+27..30`.
-8. **Neurons** (`ui_draw_nodes`): for each node in the sorted order, radius
-   `= 4 + activation/32 + shade/4` (clamped to 12). Draw an outer halo, a
-   spike ring if the neuron fired this tick, an inner core, and a white-hot
-   2 px centre when activation ≥ 160. Circles use squared-radius integer
-   rasterisation (`ui_draw_glow`, clipped to the framebuffer).
-9. **HUD** (`ui_draw_hud`): see below.
-10. **Present** (`vga_present`).
-
-### 11.4 Geometry and fixed point
-
-Model coordinates are Q8.8 (`1 px = 256`). The 24 nodes are:
-
-| Indices | Position |
-| --- | --- |
-| 0..7 | ring A: radius 88 px, `y = −42 px`, angle `i × 32` binary radians |
-| 8..15 | ring B: radius 88 px, `y = +42 px`, angle `i × 32 + 16` |
-| 16..19 | axis nodes: `(±100, 0, 0)`, `(0, 0, ±100)` |
-| 20..23 | core tetrahedron at ±35 px on each axis |
-
-The 40 edges are: for every `i` in 0..7, four connections (A-ring next,
-B-ring next, A_i–B_i, A_i–B_(i+1)) = 32; plus 4 axis→core links and 4
-axis→ring links = 40.
-
-### 11.5 HUD layout
-
-| Region | Content |
-| --- | --- |
-| Top bar (0..21 px) | background fill, two cyan lines, `ZENITHOS` (2×) at (8,3), `// NEURAL CORE` at (112,9) |
-| Top-right | `T+MM:SS` uptime at y=4, `FPS n  AI n/s` at y=12, right-aligned to x=313 |
-| Bottom bar (178..199 px) | background fill, controls line at (6,181): `W/S ZOOM  A/D ROTATE  Q/E PITCH  R RESET  C AUTO`; telemetry at (6,190): `PMM <MiB> MB FREE  HEAP <KiB> KB  SELFTEST p/t`; CMOS `HH:MM:SS` right-aligned to x=314 |
-| Log ticker (158..172 px) | newest unified-log line at (6,161) in the violet log ramp; build tag `V1.0 // 24N 40E` on the right |
-| Corners | cyan/hot-pink accent brackets at (2,24) and (308,24) |
-
-FPS is computed once per second (frames counted over 100 ticks); the spike rate
-is the per-second delta of `snn_spike_count`; the RTC is re-read once per
-second.
-
-### 11.6 Why double buffering
-
-Drawing directly to `0xA0000` would tear: the VGA beam scans while the CPU
-plots. Instead every primitive writes to `0x20000`, and a single contiguous
-`rep movsd` copies the finished frame. That also makes the frame
-deterministic: given the same state, the same 64,000 bytes are produced, which
-is what the screenshot harness hashes.
-
----
-
-## 12. Palette and DAC
-
-- VGA mode 13h is 8-bit indexed. The kernel programs all 256 DAC entries via
-  ports `0x3C8` (index) and `0x3C9` (data, 6-bit channels).
-- The palette is **generated at build time** by `build.js` from ramp
-  declarations into `build/generated/palette.inc` (768 bytes), so the colour
-  language is reproducible and reviewed as source.
-- Fixed slots 0..15 are reserved (black, white, cyan, magenta, red, green,
-  amber, background, dim, blue, violet, hot pink, bright red, teal, steel,
-  white2) so the panic screen reads correctly whether it fires before or after
-  `theme_init`.
-- Ramps: node (16..47), edge (48..63), floor grid (80..95), UI cyan (96..111),
-  log violet (112..127), green/amber/red status ramps, near-black background
-  shades (176..191).
-- Scanline texture is produced by `vga_clear_dither` alternating two
-  background shades per row — no extra framebuffer pass.
-
----
-
-## 13. Unified logging
-
-One API, two sinks, one truth:
-
-```text
-  log_info/log_warn/log_error  ──> last-message state (HUD)
-          │                         │
-          ├──> COM1 (polled TX)     └──> 32-entry ring {ptr, tick, level}
-          │
-          └──> serial capture in CI
-```
-
-- Levels: `0` info, `1` warn, `2` error. Prefixes `[INFO ]`, `[WARN ]`,
-  `[ERROR]` are written to serial.
-- Every entry records the message pointer and the tick at which it was logged.
-- The ring wraps at 32 entries; `log_count` counts entries (capped) and
-  `log_error_count` counts errors. `log_last_msg` / `log_last_level` feed the
-  HUD.
-- The self-tests report through the same logger, so the serial transcript and
-  the screen cannot disagree.
-
-The logger is safe to call before the heap or PMM exist (fixed buffers only)
-and is used from `kernel_entry` before `STI`.
-
----
-
-## 14. Panic path
-
-Any CPU exception (vectors 0..31) reaches `exception_panic(vector, error,
-EIP)`. The path is deliberately minimal: no heap, no allocation, no
-interrupts, only already-initialised VGA primitives and polled serial.
-
-1. `CLI`; capture vector, error code, `EIP`, `CR0`, `CR2`, `CR3`.
-2. Write the record to COM1 **first**:
-   `PANIC vector=0x........ error=0x........ eip=0x........`.
-3. Paint the panic screen in mode 13h:
-   - red bars top and bottom,
-   - `KERNEL PANIC` (2× font), subtitle,
-   - `VECTOR` hex, `NAME` (vectors 0..31 only, table in `panic.asm`),
-   - `ERROR` hex, `EIP` hex, `CR2` hex, `CR0` hex,
-   - `SYSTEM HALTED - RESET REQUIRED`, `full record was written to COM1`.
-4. Present the frame, then `CLI; HLT` forever.
-
-`CR3` is captured in memory but not shown on the small screen (there is no
-paging, so it is informational). The panic names include `DIVIDE ERROR`,
-`INVALID OPCODE`, `DOUBLE FAULT`, `GENERAL PROTECTION`, `PAGE FAULT`, and the
-rest of the architectural vectors.
-
----
-
-## 15. System-call ABI
-
-A native (not POSIX) `INT 0x80` ABI exists as groundwork for a future
-userspace. The gate is installed with DPL 3 so a ring-3 caller could use the
-same vector unchanged; today the self-test calls it from ring 0.
-
-| `EAX` | Name | Arguments | Returns |
+| 偏移 | 字段 | 类型 | 值/含义 |
 | --- | --- | --- | --- |
-| `0` | `SYS_TICKS` | — | `pit_ticks` |
-| `1` | `SYS_WRITE` | `EBX`=string, `ECX`=length | length; bytes go to COM1 |
-| `2` | `SYS_SNN_ENERGY` | — | `snn_energy` |
-| `3` | `SYS_HEAP_USED` | — | `heap_used_bytes()` |
-| `4` | `SYS_PMM_FREE_KB` | — | `pmm_free_kb()` |
-| other | — | — | `0xFFFFFFFF` (−1) |
+| `0x00` | `magic` | `u32` | `'ZENO'` = `0x4F4E455A` |
+| `0x04` | `version` | `u16` | `6` |
+| `0x06` | `e820_count` | `u16` | 有效 `entries[]` 条数（≤ `BOOTINFO_MAX_E820`=`24`） |
+| `0x08` | `boot_drive` | `u8` | 引导盘号（BIOS 下为 `DL`；`0x00` 软盘 / `0x80` 硬盘） |
+| `0x09` | `boot_type` | `u8` | `BOOT_TYPE_BIOS`=`0` / `BOOT_TYPE_UEFI`=`1` |
+| `0x0A` | `video_mode` | `u8` | `VIDEO_MODE_13H`=`0x13` / `_TEXT`=`0x03` / `_NONE`=`0x00` |
+| `0x0B` | `flags` | `u8` | `BOOTF_VGA`(0x01)·`BOOTF_KEYBOARD`(0x02)·`BOOTF_HEADLESS`(0x04)·`BOOTF_SERIAL`(0x08) |
+| `0x0C` | `checksum` | `u16` | 头相加校验（`0`=关闭） |
+| `0x0E` | `reserved` | `u16` | 保留 |
+| `0x10` | `entries[24]` | `E820Entry[]` | 每条 24 字节 |
 
-`syscall_entry` pushes registers (`PUSHA`), calls `syscall_dispatch`, stores the
-result, pops, and `IRET`s. There is no user/kernel copy validation because
-there is no user address space; the ABI is a mechanism proof, not a security
-boundary.
+`E820Entry`（每条 24 字节，ACPI 3.0 形状）：
 
----
+| 偏移 | 字段 | 类型 | 含义 |
+| --- | --- | --- | --- |
+| `+0` | `base` | `u64` | 区域起始地址 |
+| `+8` | `length` | `u64` | 区域字节长度 |
+| `+16` | `type` | `u32` | `1`=RAM，`2`=保留，`3/4`=ACPI… |
+| `+20` | `attrs` | `u32` | ACPI 3.0 扩展属性 |
 
-## 16. Boot self-tests
-
-`selftest_run` executes 10 checks after `STI` and before the main loop. Each
-result is logged (`selftest: <name>` on success, `[ERROR]` on failure) and
-counted into `selftest_passed/selftest_total`; the HUD shows `SELFTEST n/10`.
-
-| # | Check | Assertion |
-| --- | --- | --- |
-| 1 | Boot-info hand-off | magic `0x4F4E455A` and version 1 at `0x0500` |
-| 2 | GDT | `sgdt` base = `gdt_start`, limit = 23 |
-| 3 | IDT | `sidt` base = `idt_table`, limit = 2047 |
-| 4 | PMM | two allocations are non-zero, distinct, and freeing both restores the free count |
-| 5 | Heap | allocate 64 bytes, aligned inside the arena, write/read canaries, free, free-bytes restored |
-| 6 | SNN | 48 ticks produce at least one spike and bounded energy (`≤ 24×255`) |
-| 7 | RTC | second ≤ 59, minute ≤ 59, hour ≤ 23, month 1..12 |
-| 8 | PIT delivery | tick counter advances during a ~300,000-iteration spin |
-| 9 | VGA back buffer | read, write, restore a byte at `0x20000` |
-| 10 | `INT 0x80` | `SYS_TICKS` returns a non-zero tick value |
-
-The tests are intentionally shallow: they catch broken invariants early, in
-graphics mode, without a debugger. They are not a security test suite.
+当前 BIOS 引导写 `magic/version/boot_drive/boot_type(=0)/video_mode(=0x13)/flags(=0x03)`，
+`e820_count` 由 E820 探测写入；`checksum` 默认 `0`（关闭）。
 
 ---
 
-## 17. Build pipeline
+## 7. 启动流程
 
-`node build.js` — no npm dependencies. Pipeline:
+一条主线：**BIOS boot → 保护模式 → `startup.asm` → `kernel_main` → 子系统初始化 → 主循环**。
+固件在进保护模式后即被放弃，内核不再调用任何 BIOS。
+
+### 7.1 BIOS 引导（`boot/bios/boot.asm`，512 字节）
+
+| 步 | 动作 | 代码 |
+| :-: | --- | --- |
+| 1 | 固件加载 LBA 0 到 `0000:7C00` 并跳入 | `boot_main` |
+| 2 | `CLI`，段清零，`SP=0x7C00`，`CLD`，保存 `DL`（引导盘） | `boot_main` |
+| 3 | A20：先测，再 BIOS `INT 15h AX=2401h`，再端口 `0x92` 位 1；每次以 `0x0500`/`0x0510` 别名测试验证 | `enable_a20` / `a20_check` |
+| 4 | E820 探测：`INT 15h EAX=E820 EDX='SMAP' ECX=24`，描述符写入 `BOOTINFO_ENTRIES`（`0x510`），计数写入 `+6`（≤24） | `e820_probe` |
+| 5 | CHS 加载内核：LBA 1..120 逐扇区 `INT 13h AH=02h` 到 `ES:BX=KERNEL_ORG`，每扇区 3 次重试 + 控制器复位 | `load_kernel` |
+| 6 | 切 VGA 模式 13h（`INT 10h AX=0013h`）——在进保护模式**前**完成 | `boot_main` |
+| 7 | 写 BootInfo 头（`magic/version/boot_drive/boot_type=0/video_mode=0x13/flags=0x03`） | `boot_main` |
+| 8 | `CLI`，`LGDT`，置 `CR0.PE`，`jmp 0x08:pm_entry` | `boot_main` |
+| 9 | 32 位跳板：段 = `0x10`，`ESP=KERNEL_STACK_TOP`，`EBP=0`，`EBX=BOOTINFO_ADDR`，`EAX=KERNEL_ORG`，`JMP EAX` | `pm_entry` |
+
+### 7.2 内核入口（`src/kernel/startup.asm`）
+
+`_start` 必须位于内核镜像偏移 0（构建强制检查）。它清段选择子、设 `ESP=0x9F000`，
+把 `[__bss_start, __bss_end)` 清零（链接器提供的合成符号），然后 `push EBX`（BootInfo*）
+调用 `kernel_main(BootInfo*)`，返回后 `hlt` 停机。
+
+### 7.3 `kernel_main` 与子系统初始化
+
+当前 `src/kernel/kernel_main.c` 已实现最小序（可作为目标流程的前缀）：
 
 ```text
-1. find NASM            env NASM, ./nasm.exe, ./nasm, ./bin, Program Files, PATH
-2. parse config.inc     KERNEL_SECTORS (120), KERNEL_ORG (0x10000)
-3. generate trig.inc    256 Q8.8 sin/cos entries (512 B)
-4. generate palette.inc 256 RGB 0..63 triples (768 B)
-5. module gate          every src/**/*.asm except kernel.asm:
-                        nasm -f obj -DZENITH_OBJ_CHECK -I src -I build/generated
-6. assemble boot.bin    nasm -f bin -I src
-7. assemble kernel.bin  nasm -f bin -I src -I build/generated
-8. validate             boot 512 B + 0xAA55; kernel <= 61,440 B
-9. pack image           boot @ 0, kernel @ 512, zero fill to 1,474,560
-10. read back           boot bytes, kernel bytes, zero tail
-11. report              build/report.json (modules, hashes, checks, timings)
-12. print SHA-256       of build/zenithos.img
+serial_init()      COM1 16550 初始化，输出 "ZenithOS v6.0 [x86_32] booting..."
+vga_init()         模式 13h 初始化 + 双缓冲清屏
+vga_*()            输出横幅 / 调色板文本
+vga_swap()         双缓冲 -> 0xA0000
+cpu_hlt()          空闲循环
 ```
 
-CLI flags: `--no-check` (skip the module gate), `--quiet`, `--verbose`. The
-image is written to both `build/zenithos.img` and `zenithos.img`; build products
-are gitignored.
+目标（v6.0 完整）初始化顺序，在 HAL/arch/mm/drivers 落地后扩为：
 
-`build/report.json` is the machine-readable provenance record: NASM version,
-module object sizes, boot/kernel/image hashes, image geometry, boolean checks,
-generated-asset hashes, and durations. CI archives it with the image.
+```text
+_ start（startup.asm：清 BSS，EBX=BootInfo*）
+  → kernel_main(BootInfo*)
+      1. 校验 BootInfo（magic 0x4F4E455A、version 6、e820_count ≤ 24）
+      2. HAL：cpu_cli / 串口输出
+      3. 内存：pmm_init（E820 → 位图）→ paging_init（恒等映射 + 启 CR0.PG）→ heap_init
+      4. 架构：gdt_init → idt_init → isr_init → pic_init
+      5. 驱动：pit_init / rtc_init / keyboard_init / device 探测树
+      6. 自适应输出：依 video_mode/flags 选 VGA/文本/串口/无头
+      7. UI：theme_init → desktop/terminal/roles/scene3d 初始化
+      8. cpu_sti：开中断
+      9. 主循环（四角色工作区调度）
+```
 
-**Verified v1.0.0 release artifact:**
+> 中断在 IDT/PIC/处理程序就绪前保持关闭；`STI` 只在全部就绪后执行，避免半初始化处理器被触发。
 
-| Artifact | Size | SHA-256 |
+---
+
+## 8. 内核模块目录结构
+
+图例：**[已实现]** 引导后实际运行（v86 可回放）· **[已编译·未接线]** 源码已存在并通过编译/链接，
+但 `kernel_main` 尚未调用 · **[目标架构]** 尚无实现 · **[接口骨架]** 仅头/文档，不参与编译。
+
+```text
+src/
+├── include/
+│   ├── zenith.h           [已实现] 主头：自由站立类型、ABI 常量、BootInfo 契约
+│   ├── config.h           [已实现] C 侧内存映射与 ABI（与 config.inc 镜像）
+│   ├── config.inc         [已实现] NASM 引导契约（纯常量）
+│   ├── bootinfo.h         [已实现] BootInfo 与 E820Entry（packed）
+│   ├── stdint.h / stddef.h / stdbool.h / stdarg.h  [已实现] 自由站立标准子集
+├── hal/
+│   ├── hal.h              [已实现] HAL 入口（聚合 port.h / cpu.h）
+│   └── x86/
+│       ├── port.{h,asm}   [已实现] 端口 I/O（outb/inb/outw/inw/outl/inl/io_wait）
+│       └── cpu.{h,asm}    [已实现] CPU 控制（cli/sti/hlt/rdtsc/CRx/invlpg/lgdt/lidt）
+├── arch/
+│   ├── arch.h             [已实现] 架构层入口（头文件分发）
+│   ├── x86_32/            [已编译·未接线] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
+│   └── arm64/             [接口骨架] arch.h / README.md（不参与 x86 编译）
+├── mm/
+│   ├── mm.h               [已实现] 内存层入口
+│   ├── pmm.{c,h}          [已编译·未接线] 位图物理页分配器（4 KiB）
+│   ├── paging.{c,h}       [已编译·未接线] 恒等映射分页 + 启用
+│   └── heap.{c,h}         [已编译·未接线] 内核堆
+├── lib/
+│   ├── string.{c,h}       [已实现] kmemset/kmemcpy/kmemmove/kmemcmp/kstrlen/kstrcmp/...
+│   ├── math.{c,h}         [已编译·未接线] 定点数学库（供 scene3d 线框变换）
+│   ├── fmt.{c,h}          [已编译·未接线] 格式化输出（hex/dec）
+│   ├── log.{c,h}          [已编译·未接线] 统一日志（串口 + 内存环形 + 级别/时间戳）
+│   └── panic.{c,h}        [已编译·未接线] 异常报告 + panic 屏
+├── drivers/
+│   ├── vga.{c,h}          [已实现] 模式 13h 原语 + 5×7 文本（双缓冲、vga_swap）
+│   ├── serial.{c,h}       [已实现] 16550 串口（COM1 0x3F8）
+│   ├── keyboard.{c,h}     [已编译·未接线] PS/2 键盘（scancode set 1、环形缓冲、键状态）
+│   ├── pit.{c,h}          [已编译·未接线] 8254 可编程间隔定时器（100 Hz）
+│   ├── rtc.{c,h}          [已编译·未接线] CMOS 实时时钟
+│   └── device.{c,h}       [已编译·未接线] 设备探测 / 设备树
+├── kernel/
+│   ├── startup.asm        [已实现] 内核入口（_start 位于偏移 0，清 BSS，调 kernel_main）
+│   ├── kernel_main.c      [已实现] C 入口（当前：串口 + VGA + 空闲循环）
+│   ├── console.{c,h}      [目标架构] 控制台壳
+│   └── sysinfo.{c,h}      [目标架构] 系统信息采集
+└── ui/
+    ├── font.{c,h}         [已编译·未接线] 5×7 位图字体（FONT_WIDTH 5 / FONT_HEIGHT 7）
+    ├── theme.{c,h}        [目标架构] 调色板与主题
+    ├── desktop.{c,h}      [目标架构] GUI 桌面
+    ├── terminal.{c,h}     [目标架构] 终端（开发者模式）
+    ├── roles.{c,h}        [目标架构] 角色 / 无障碍 / 管理面板
+    └── scene3d.{c,h}      [目标架构] 3D 线框视觉（创作者模式）
+```
+
+> `[已编译·未接线]` 的模块在 v6.0 重写中已落地源码、并随 `node build.js` 编译链接进
+> `kernel.bin`（否则无法通过 GNU `ld` 的符号解析），但启动路径 `kernel_main` 尚未调用它们——
+> 打开 IDT/IRQ 与启用分页是紧随其后的工作。`[目标架构]` 文件尚未在仓库创建。
+> 构建系统自动发现 `src/**/*.{c,asm}`，新增模块无需改 `build.js`。
+
+---
+
+## 9. 构建与链接
+
+`node build.js`（零 npm 依赖）管线：
+
+```text
+1. 定位工具链         $NASM / $TCC 环境变量 → 仓库根（nasm.exe、tcc/tcc.exe）→ PATH；
+                      ld / objcopy / nm：$LD / $OBJCOPY → PATH → 常见 mingw/msys 目录
+2. 解析 config.inc    KERNEL_ORG、KERNEL_SECTORS（120）
+3. 发现源码           src/**/*.{c,asm}（startup.asm 排最前，保证 _start 在偏移 0）；
+                      对象名保留源扩展名（foo.c.o / foo.asm.o），避免 idt.c 与 idt.asm 互踩
+4. 编译/汇编          TCC -c 编译 .c；NASM -f elf32 汇编 .asm → 各产出 ELF32 .o
+5. 链接               GNU ld + 生成的 build/kernel.ld：
+                        - 段布局 .text/.rodata/.data/.bss，起点 KERNEL_ORG
+                        - 合成符号 __bss_start/__bss_end/__end/__kernel_end/__kernel_size
+                        - 解析全部符号与重定位（ld 全功能，非自造链接器）
+                        - mingw PE 模拟另需 --image-base ORG-0x1000 为 PE 头留页
+                      → kernel.exe（PE 或 ELF，取决于宿主 binutils）
+6. 平坦化             objcopy -O binary kernel.exe kernel.bin
+                        - 剥掉容器头，文件偏移 0 即 .text 起点（_start）
+                        - .bss 为 NOBITS，不出现在文件中，由 startup.asm 运行时清零
+7. 组装引导           nasm -f bin boot/bios/boot.asm → build/boot.bin（512 B + 0xAA55）
+8. 打包               引导@0，内核@512，零填充至 1,474,560 → zenithos.img（根 + build/）
+9. 校验               nm 回读 _start == KERNEL_ORG；引导尺寸/签名、内核预算、回读；
+                      写 build/report.json + SHA-256
+```
+
+CLI：`--quiet` / `--verbose`。`build/report.json` 记录 `nasm`/`tcc`/`ld`/`objcopy` 路径、对象
+清单、内核字节数/预算/填充率、`bss` 起止、入口、镜像与内核 SHA-256。
+
+> **设计决定：** 链接交给 GNU `ld` 而不是在 `build.js` 里手写 ELF32 链接器——前者是几十年的
+> 成熟工具，后者是无穷尽的边界情形（重定位类型、段对齐、弱符号、COMMON 合并）。构建脚本只做
+> 三件事：生成链接脚本、调度编译器/链接器、校验产物契约。
+
+---
+
+## 10. 四角色工作区
+
+模块三（桌面）的目标是**四角色工作区**，v6.0 交付前三类；第四类（无障碍）在 v6.2 完整实现：
+
+| 角色 | 交互 | 实现 |
 | --- | --- | --- |
-| `build/boot.bin` | 512 B | `36e551a14909f70b51336596e5d0dacb0bf02a6b3651575f15110abc32f439a8` |
-| `build/kernel.bin` | 19,376 / 61,440 B (31.5%) | `88926f1c573f234088e82687e4d9eed8f78a6a8760961268e319876ddb0b4efe` |
-| `build/zenithos.img` | 1,474,560 B | `a5a9d9f26af8ae82429c593539f9d14059d60013dbbb3b1345758dbaf3513d13` |
+| **桌面 ↔ 终端** | 通用 GUI 桌面与终端通过快捷键**无损热切换** | `src/ui/desktop`、`src/ui/terminal` |
+| **开发者模式** | 硬核终端；可查看**内存页 / 寄存器状态** | `src/ui/terminal`（+ `lib/fmt`、`lib/log`） |
+| **创作者模式** | 极简沉浸式 **3D 线框视觉桌面**（定点数学库） | `src/ui/scene3d`（+ `lib/math`） |
+| **无障碍/管理面板** | 极高对比度纯文本大字体面板，**监控系统健康** | `src/ui/roles`（v6.2 完整实现） |
+
+「三角色工作区」（ROADMAP v6.0 用语）指 v6.0 完整交付的桌面/开发者/创作者三类；第四角色为
+无障碍/管理面板，v6.0 出骨架、v6.2 完整实现，构成「四角色工作区」。
 
 ---
 
-## 18. Headless verification harness
+## 11. 平台派生矩阵
 
-`tools/emulate.mjs` boots an image under v86 (the WebAssembly x86 emulator)
-without a browser:
-
-- loads BIOS images from `tools/vendor/` (auto-downloaded and size-checked if
-  missing), the floppy image, 64 MiB RAM, 8 MiB VGA;
-- installs a minimal `ImageData` shim so v86 allocates its RGBA buffer in Node;
-- waits a configurable time (default 6 s) for the guest to enter a graphical
-  mode;
-- composes the visible 320×200 frame from the VGA layers, writes PNGs with a
-  dependency-free encoder (`tools/lib/png.mjs`), optionally scaled 3×;
-- can inject keys (`--keys "w,w,d,r"`, PS/2 set-1 scancodes through the
-  emulated 8042), capture before/after frames, and diff them;
-- can capture COM1 output (`--serial`), and records CPU exception vectors;
-- fails if the frame is blank/uniform/non-graphical (exit 3), if the emulator
-  faults (exit 2), or on usage/IO errors (exit 4); PASS is exit 0;
-- writes crash diagnostics (`<out>-crash.txt`, `<out>-crash.png`) on failure.
-
-The PASS gate requires ≥ 1% non-black pixels, ≥ 16 distinct colours, and a
-non-uniform frame. That is enough to distinguish a rendered desktop from a
-black screen without pinning every pixel; exact golden-frame comparison is
-v1.1 work (see [`TESTING.md`](TESTING.md)).
-
-Measured v1.0 gate result: 320×200, **100.00% non-black pixels, 61 distinct
-colours**, a **~15–17% frame change** after injected WASD input, and
-**~30–34 FPS** under the emulator. The FPS figure is an emulator measurement,
-not a hardware benchmark: the kernel paces frames to the 100 Hz PIT and is
-designed for 100 fps on real hardware.
-
----
-
-## 19. Determinism and invariants
-
-The system is built to be reproducible and to fail loudly:
-
-1. **Deterministic build.** NASM assembles static sources; the only generated
-   inputs are pure functions of constants (trig, palette). The image is
-   zero-padded and the SHA-256 is printed; two builds of the same source
-   produce the same hash.
-2. **Deterministic desktop.** SNN state is integer and seeded with a constant;
-   the renderer is a pure function of SNN state, camera state, tick count, and
-   static geometry. No `RDTSC`, no RTC in the render path.
-3. **Fixed memory contract.** `config.inc` is shared by loader and kernel;
-   `build.js` checks the kernel against the load window; the PMM never hands
-   out the same frame twice (bit set on alloc, cleared on free).
-4. **Single CPU, no preemption beyond IRQs.** The main loop and interrupt
-   handlers only share data through word-sized counters and ring indices;
-   there are no locks because there is only one core.
-5. **Interrupts disabled until the IDT is installed.** The boot sector never
-   executes `STI`; the kernel enables interrupts only after all handlers,
-   drivers, and the syscall gate are ready.
-6. **No heap in the panic path.** `exception_panic` cannot allocate, so a heap
-   corruption cannot prevent the fault report.
-
-Known non-invariants (documented limits): no memory isolation, no privilege
-separation, no scheduler, no paging, no storage, no networking, and no
-multi-user model. See [`SECURITY.md`](SECURITY.md).
-
----
-
-## 20. Source index
-
-| Path | Lines (v1.0) | Purpose |
+| 维度 | 已实现 | 接口（骨架） |
 | --- | --- | --- |
-| `boot.asm` | 275 | 512-byte real-mode bootstrap |
-| `src/kernel.asm` | 134 | composition root, entry vector, main loop, boot log |
-| `src/include/config.inc` | 104 | ABI constants and physical memory map |
-| `src/include/macros.inc` | 36 | I/O, delay, assertion macros |
-| `src/arch/gdt.asm` | 60 | flat GDT |
-| `src/arch/idt.asm` | 92 | 256-gate IDT + `idt_set_gate` |
-| `src/arch/isr.asm` | 173 | exception/IRQ stubs, dispatcher |
-| `src/arch/pic.asm` | 132 | 8259 remap/mask/EOI |
-| `src/arch/syscall.asm` | 102 | native `INT 0x80` ABI |
-| `src/drivers/pit.asm` | 46 | 8254 @ 100 Hz |
-| `src/drivers/serial.asm` | 82 | COM1 polled output |
-| `src/drivers/keyboard.asm` | 219 | IRQ1, scancode set 1, ring |
-| `src/drivers/vga.asm` | 543 | mode 13h primitives, palette, text |
-| `src/drivers/rtc.asm` | 137 | CMOS clock |
-| `src/mm/pmm.asm` | 262 | E820 physical frame bitmap |
-| `src/mm/heap.asm` | 233 | first-fit kernel heap |
-| `src/ai/snn.asm` | 211 | 24-neuron spiking network |
-| `src/ui/font.asm` | 118 | 5×7 bitmap font |
-| `src/ui/theme.asm` | 29 | generated palette upload |
-| `src/ui/neural.asm` | 1499 | 3D neural-mesh desktop renderer |
-| `src/lib/fixed.asm` | 81 | Q8.8 trig and clamps |
-| `src/lib/string.asm` | 167 | string/format helpers |
-| `src/lib/log.asm` | 122 | unified logger |
-| `src/lib/panic.asm` | 271 | panic screen + serial record |
-| `src/lib/selftest.asm` | 278 | 10 boot self-tests |
-| `build.js` | 447 | build, generation, packing, verification |
-| `tools/emulate.mjs` | 865 | headless v86 harness |
+| CPU 架构 | x86_32（32 位保护模式） | arm64（`src/arch/arm64/{arch.h,README.md}`） |
+| 固件 | BIOS（`boot/bios/boot.asm`） | UEFI（`boot/uefi/`，移交规范前述） |
 
-Line counts are from the v1.0 source and may drift with refactors; the module
-list and ABI are the durable contract.
+统一 HAL + `BootInfo.boot_type`/`video_mode` 抽象保证：内核主体不感知固件/架构来源，驱动经
+HAL 访问寄存器。派生一条新平台 = 提供等价的 `boot/*` 与 `arch/*` + 复用 `hal` 之上的全部代码。
+详见 [docs/ECOSYSTEM.md](ECOSYSTEM.md)。
 
 ---
 
-*Architecture document for ZenithOS v1.0. If this document and the source
-disagree, the source wins — and the document is a bug.*
+*ZenithOS v6.0 架构文档结束。若本文与源码冲突，源码胜出，本文即缺陷。*
