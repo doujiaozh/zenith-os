@@ -24,6 +24,7 @@
 
 void vga_init(void);
 void vga_clear(uint8_t color);
+void vga_scroll(int lines, uint8_t color);
 void vga_set_pixel(int x, int y, uint8_t color);
 void vga_fill_rect(int x, int y, int w, int h, uint8_t color);
 void vga_vline(int x, int y0, int y1, uint8_t color);

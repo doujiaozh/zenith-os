@@ -45,6 +45,19 @@ void vga_clear(uint8_t color) {
     kmemset(backbuf, color, VGA_WIDTH * VGA_HEIGHT);
 }
 
+/* Scroll the back buffer up by `lines` pixels; the freed space at the
+ * bottom is filled with `color`. Used by the console to keep a growing
+ * shell log on screen. */
+void vga_scroll(int lines, uint8_t color) {
+    int row;
+    if (lines <= 0) return;
+    if (lines >= VGA_HEIGHT) { vga_clear(color); return; }
+    kmemcpy(backbuf, backbuf + VGA_PITCH * (uint32_t)lines,
+            VGA_PITCH * (uint32_t)(VGA_HEIGHT - lines));
+    for (row = VGA_HEIGHT - lines; row < VGA_HEIGHT; row++)
+        vga_hline(0, VGA_WIDTH - 1, row, color);
+}
+
 void vga_set_pixel(int x, int y, uint8_t color) {
     if (x < 0 || y < 0 || x >= VGA_WIDTH || y >= VGA_HEIGHT) return;
     backbuf[y * VGA_PITCH + x] = color;

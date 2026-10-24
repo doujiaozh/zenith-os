@@ -93,14 +93,13 @@ timeline
 
 ### 当前实现现状（诚实）
 
-仓库今天已经通过退出标准的子集：BIOS 引导、BootInfo 移交、`kernel_main` C 入口存活
-（`serial_init` + `vga_init` + 空闲循环）、HAL 的 port/cpu、字符串库、完整构建/链接/
-打包管线（GNU `ld` + `objcopy`，镜像在 v86 无头串口/帧捕获下可回放）。架构层
-（GDT/IDT/ISR/PIC 的 C/ASM）、内存管理（PMM/分页/堆）、其余驱动（keyboard/pit/rtc/device）、
-5×7 字体与 `lib/{math,fmt,log,panic}` **均已落地源码、编译并链接进 `kernel.bin`，
-但 `kernel_main` 尚未调用**（`[已编译·未接线]`）。`[目标架构]`（未创建文件）：UI 的
-theme/desktop/terminal/roles/scene3d 与三角色工作区交互。打开 IDT/IRQ、启用分页与 UI 是
-v6.0 自身的剩余工作。
+仓库今天已经通过退出标准的子集：BIOS 引导、BootInfo 移交、`kernel_main` C 入口存活、
+HAL 的 port/cpu、字符串库、完整构建/链接/打包管线（GNU `ld` + `objcopy`，镜像在 v86 无头
+串口/帧捕获下可回放）。IDT/PIC/ISR 与 PS/2 键盘中断已经打开（IRQ1→键盘、IRQ0→100 Hz 节拍），
+之上运行**交互式 Shell**（提示符/回显/Backspace/Enter + `help`/`clear`/`reboot`/`3d` 命令，
+`3d` 进入 Q8.8 定点旋转的 3D 神经网格演示、ESC 返回 Shell）。`[已编译·未接线]`：PMM/分页/堆、
+rtc/device、`lib/{fmt,log,panic}`。`[目标架构]`（未创建文件）：UI 的
+theme/desktop/terminal/roles/scene3d 与三角色工作区交互。启用分页与 UI 是 v6.0 自身的剩余工作。
 
 ---
 

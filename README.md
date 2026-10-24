@@ -56,11 +56,14 @@ CPU 控制、字符串库、5×7 字体、以及完整的多目标构建/链接/
 | HAL（`src/hal/x86`） | **[已实现]** | 端口 I/O（`outb/inb/...`）+ CPU 控制（`cli/sti/hlt/CRx/...`） |
 | 自由站立 libc（`src/lib/string`） | **[已实现]** | `kmemset/kmemcpy/kstrlen/kstrcmp/...` |
 | 构建管线（`build.js`） | **[已实现]** | TCC + NASM → **GNU `ld` + `objcopy`** → 平坦 `kernel.bin` → 1.44 MB 镜像 |
-| GDT / IDT / ISR / PIC（`src/arch/x86_32`） | **[已编译·未接线]** | 代码已链接进镜像，`kernel_main` 尚未安装（下一里程碑打开中断） |
+| GDT / IDT / ISR / PIC（`src/arch/x86_32`） | **[已实现]** | 启动时安装 IDT + PIC 重映射：IRQ1→键盘、IRQ0→PIT，CPU 异常进 panic |
+| 交互式 Shell（`src/kernel/kernel_main.c`） | **[已实现]** | `ZenithOS> ` 提示符、字符回显、Backspace 编辑、Enter 执行、串口镜像 |
+| 键盘 / PIT（`src/drivers`） | **[已实现]** | PS/2 set 1 中断驱动（环缓冲 + scancode→ASCII），100 Hz 系统节拍 |
+| 3D 神经网格（`src/ui/render3d`） | **[已实现]** | Q8.8 定点旋转 + 透视投影 + Bresenham 网格，`3d` 命令进入、ESC 返回 |
+| 5×7 字体（`src/ui/font`） | **[已实现]** | Shell 文本层逐字符绘制（VGA 双缓冲） |
 | PMM / 内核堆 / 分页（`src/mm`） | **[已编译·未接线]** | 位图分配器、bump heap、恒等映射页目录填表代码齐备，均未在启动路径调用 |
-| 键盘 / PIT / RTC（`src/drivers`） | **[已编译·未接线]** | 驱动已链接，等待 IDT/IRQ 接线后启用 |
-| 5×7 字体（`src/ui/font`） | **[已编译·未接线]** | 位图字体表已链接，UI 层未绘制 |
-| 桌面 / 终端 / 3D / 角色（`src/ui/{desktop,terminal,scene3d,roles,theme}`） | **[目标架构]** | v6.1/v6.2 的四角色工作区 |
+| RTC / 设备探测（`src/drivers`） | **[已编译·未接线]** | 驱动已链接，等待后续调度/设备树接线 |
+| 桌面 / 终端工作区（`src/ui/{desktop,terminal,scene3d,roles,theme}`） | **[目标架构]** | v6.1/v6.2 的四角色工作区（`render3d` 是其 3D 渲染地基） |
 | 分页启用 | **[目标架构]** | 页目录 `0x71000`、页表 `0x72000` 地址已预留，`paging_enable` 未调用 |
 | UEFI 引导 / arm64 / 用户态 / FS / 网络 | **[目标架构]** | 仅接口骨架（`boot/uefi`、`src/arch/arm64` 为文档+头文件） |
 
@@ -103,17 +106,17 @@ ZenithOS 的宪法是七条可检验的原则。下表说明每条原则在本�
 │   │   ├── hal.h            [已实现] HAL 入口（聚合 port.h / cpu.h）
 │   │   └── x86/             [已实现] port.{h,asm}、cpu.{h,asm}：端口 I/O、CPU 控制
 │   ├── arch/
-│   │   ├── arch.h           [目标架构] 架构层入口
-│   │   ├── x86_32/          [已编译·未接线] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
+│   │   ├── arch.h           [已实现] 架构层入口
+│   │   ├── x86_32/          [已实现] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
 │   │   └── arm64/           [接口骨架] arch.h / README.md（不参与 x86 编译）
 │   ├── mm/                  [已编译·未接线] mm.h / pmm / paging / heap（.{c,h}）
-│   ├── lib/                 [已实现] string（kmemset/…）
-│   │                        [已编译·未接线] math / fmt / log / panic（.{c,h}）
-│   ├── drivers/             [已实现] vga（13h 双缓冲）/ serial（16550 COM1）
-│   │                        [已编译·未接线] keyboard / pit / rtc / device
-│   ├── kernel/              [已实现] startup.asm / kernel_main.c
+│   ├── lib/                 [已实现] string / math（render3d 定点旋转）
+│   │                        [已编译·未接线] fmt / log / panic（.{c,h}）
+│   ├── drivers/             [已实现] vga / serial / keyboard（PS/2 中断）/ pit（100 Hz）
+│   │                        [已编译·未接线] rtc / device
+│   ├── kernel/              [已实现] startup.asm / kernel_main.c（交互式 Shell）
 │   │                        [目标架构] console / sysinfo
-│   └── ui/                  [已编译·未接线] font（5×7 位图）
+│   └── ui/                  [已实现] font（5×7 位图）/ render3d（3D 神经网格）
 │                            [目标架构] theme / desktop / terminal / roles / scene3d
 ├── build.js                 [已实现] 构建系统（TCC + NASM → GNU ld + objcopy）
 ├── tools/

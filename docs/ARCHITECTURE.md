@@ -140,8 +140,8 @@ src 目录本身仍按 HAL/arch/mm/lib/drivers/kernel/ui 分层。
 | `boot/bios/boot.asm` | [已实现] | 512 字节 BIOS 引导（§7） |
 | `src/include/` | [已实现] | 自由站立头文件 + ABI：`zenith.h, config.h, config.inc, bootinfo.h, stdint.h, stddef.h, stdbool.h, stdarg.h` |
 | `src/mm/` | [已编译·未接线] | `mm.h, pmm, paging, heap`：4 KiB 位图分配器、恒等映射分页、内核堆 |
-| `src/lib/` | [已实现] / [已编译·未接线] | `string`（运行中）/ `math, fmt, log, panic`（已链接未调用） |
-| `src/kernel/` | [已实现] / [目标架构] | `startup.asm, kernel_main.c`（运行中）/ `console, sysinfo`（未创建） |
+| `src/lib/` | [已实现] / [已编译·未接线] | `string, math`（运行中）/ `fmt, log, panic`（已链接未调用） |
+| `src/kernel/` | [已实现] / [目标架构] | `startup.asm, kernel_main.c`（交互式 Shell，§9）/ `console, sysinfo`（未创建） |
 
 ### 模块二 · 多设备（Hardware）
 
@@ -150,8 +150,8 @@ src 目录本身仍按 HAL/arch/mm/lib/drivers/kernel/ui 分层。
 | 目录/文件 | 状态 | 职责 |
 | --- | --- | --- |
 | `src/hal/` | [已实现] | `hal.h, hal/x86/{port,cpu}.{h,asm}`：端口 I/O、CPU 控制 |
-| `src/arch/` | [已编译·未接线] / [接口骨架] | `arch/x86_32/*`（GDT/IDT/ISR/PIC 已链接未调用）/ `arch/arm64/*` |
-| `src/drivers/` | [已实现] / [已编译·未接线] | `vga, serial`（运行中）/ `keyboard, pit, rtc, device`（已链接未调用） |
+| `src/arch/` | [已实现] / [接口骨架] | `arch/x86_32/*`（GDT/IDT/ISR/PIC 启动时安装并路由 IRQ）/ `arch/arm64/*` |
+| `src/drivers/` | [已实现] / [已编译·未接线] | `vga, serial, keyboard, pit`（运行中）/ `rtc, device`（已链接未调用） |
 | `boot/uefi/` | [接口骨架] | UEFI 移交规范接口骨架（§11） |
 
 ### 模块三 · 桌面（Desktop）
@@ -160,12 +160,13 @@ src 目录本身仍按 HAL/arch/mm/lib/drivers/kernel/ui 分层。
 
 | 目录/文件 | 状态 | 职责 |
 | --- | --- | --- |
-| `src/ui/font` | [已编译·未接线] | 5×7 位图字体（已链接，UI 层未绘制） |
+| `src/ui/font` | [已实现] | 5×7 位图字体（Shell 文本层逐字符绘制） |
+| `src/ui/render3d` | [已实现] | 3D 神经网格渲染（Q8.8 定点旋转 + 透视投影，`3d` 命令进入，ESC 返回） |
 | `src/ui/theme` | [目标架构] | 调色板与主题 |
 | `src/ui/desktop` | [目标架构] | GUI 桌面 |
 | `src/ui/terminal` | [目标架构] | 硬核终端（开发者模式） |
 | `src/ui/roles` | [目标架构] | 角色/无障碍/管理面板 |
-| `src/ui/scene3d` | [目标架构] | 3D 线框视觉（创作者模式） |
+| `src/ui/scene3d` | [目标架构] | 3D 线框视觉（创作者模式；`render3d` 是其地基） |
 
 ### 模块四 · 生态（Ecosystem）
 
@@ -332,7 +333,7 @@ src/
 │       └── cpu.{h,asm}    [已实现] CPU 控制（cli/sti/hlt/rdtsc/CRx/invlpg/lgdt/lidt）
 ├── arch/
 │   ├── arch.h             [已实现] 架构层入口（头文件分发）
-│   ├── x86_32/            [已编译·未接线] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
+│   ├── x86_32/            [已实现] arch.h / gdt / idt / isr / pic（.{c,h,asm}）
 │   └── arm64/             [接口骨架] arch.h / README.md（不参与 x86 编译）
 ├── mm/
 │   ├── mm.h               [已实现] 内存层入口
@@ -341,24 +342,26 @@ src/
 │   └── heap.{c,h}         [已编译·未接线] 内核堆
 ├── lib/
 │   ├── string.{c,h}       [已实现] kmemset/kmemcpy/kmemmove/kmemcmp/kstrlen/kstrcmp/...
-│   ├── math.{c,h}         [已编译·未接线] 定点数学库（供 scene3d 线框变换）
+│   ├── math.{c,h}         [已实现] 定点数学库（render3d 旋转矩阵；供 scene3d 线框变换）
 │   ├── fmt.{c,h}          [已编译·未接线] 格式化输出（hex/dec）
 │   ├── log.{c,h}          [已编译·未接线] 统一日志（串口 + 内存环形 + 级别/时间戳）
 │   └── panic.{c,h}        [已编译·未接线] 异常报告 + panic 屏
 ├── drivers/
-│   ├── vga.{c,h}          [已实现] 模式 13h 原语 + 5×7 文本（双缓冲、vga_swap）
+│   ├── vga.{c,h}          [已实现] 模式 13h 原语 + 5×7 文本 + 滚动（双缓冲、vga_swap）
 │   ├── serial.{c,h}       [已实现] 16550 串口（COM1 0x3F8）
-│   ├── keyboard.{c,h}     [已编译·未接线] PS/2 键盘（scancode set 1、环形缓冲、键状态）
-│   ├── pit.{c,h}          [已编译·未接线] 8254 可编程间隔定时器（100 Hz）
+│   ├── keyboard.{c,h}     [已实现] PS/2 键盘（scancode set 1、环形缓冲、键状态、IRQ1）
+│   ├── pit.{c,h}          [已实现] 8254 可编程间隔定时器（100 Hz，动画/Shell 计时）
 │   ├── rtc.{c,h}          [已编译·未接线] CMOS 实时时钟
 │   └── device.{c,h}       [已编译·未接线] 设备探测 / 设备树
 ├── kernel/
 │   ├── startup.asm        [已实现] 内核入口（_start 位于偏移 0，清 BSS，调 kernel_main）
-│   ├── kernel_main.c      [已实现] C 入口（当前：串口 + VGA + 空闲循环）
-│   ├── console.{c,h}      [目标架构] 控制台壳
+│   ├── kernel_main.c      [已实现] 交互式 Shell：提示符/回显/Backspace/Enter
+│   │                              + help / clear / reboot / 3d
+│   ├── console.{c,h}      [目标架构] 控制台壳（当前位置：kernel_main.c 内的 term_* 层）
 │   └── sysinfo.{c,h}      [目标架构] 系统信息采集
 └── ui/
-    ├── font.{c,h}         [已编译·未接线] 5×7 位图字体（FONT_WIDTH 5 / FONT_HEIGHT 7）
+    ├── font.{c,h}         [已实现] 5×7 位图字体（FONT_WIDTH 5 / FONT_HEIGHT 7）
+    ├── render3d.{c,h}     [已实现] 3D 神经网格（Q8.8 旋转 + 透视投影，ESC 返回）
     ├── theme.{c,h}        [目标架构] 调色板与主题
     ├── desktop.{c,h}      [目标架构] GUI 桌面
     ├── terminal.{c,h}     [目标架构] 终端（开发者模式）
@@ -367,9 +370,9 @@ src/
 ```
 
 > `[已编译·未接线]` 的模块在 v6.0 重写中已落地源码、并随 `node build.js` 编译链接进
-> `kernel.bin`（否则无法通过 GNU `ld` 的符号解析），但启动路径 `kernel_main` 尚未调用它们——
-> 打开 IDT/IRQ 与启用分页是紧随其后的工作。`[目标架构]` 文件尚未在仓库创建。
-> 构建系统自动发现 `src/**/*.{c,asm}`，新增模块无需改 `build.js`。
+> `kernel.bin`（否则无法通过 GNU `ld` 的符号解析），但启动路径尚未调用它们——IDT/IRQ
+> 已经打开（键盘与 100 Hz 节拍中断驱动），分页启用是紧随其后的工作。`[目标架构]` 文件
+> 尚未在仓库创建。构建系统自动发现 `src/**/*.{c,asm}`，新增模块无需改 `build.js`。
 
 ---
 
