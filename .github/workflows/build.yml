@@ -17,4 +17,17 @@ jobs:
         sudo apt-get update && sudo apt-get install -y gcc nasm binutils
 
     - name: Build OS
-      run: node build.js
+      run: |
+        set -o pipefail
+        node build.js 2>&1 | tee build.log
+
+    - name: Surface build failure
+      if: failure()
+      run: |
+        # GitHub's annotation engine does not parse build.js's FATAL format,
+        # so re-emit the failure span as an explicit workflow error command.
+        msg=$(sed -n '/FATAL/,$p' build.log 2>/dev/null | tr '\r\n' '  ' | head -c 3000)
+        if [ -z "$msg" ]; then
+          msg="no FATAL line; last output: $(tail -c 1500 build.log 2>/dev/null | tr '\r\n' '  ')"
+        fi
+        echo "::error title=Build OS failed::$msg"
