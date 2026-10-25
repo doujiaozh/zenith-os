@@ -95,7 +95,7 @@ int      netbuf_append(NetBuf *nb, const void *data, size_t n);
 
 /* --- accessors ------------------------------------------------------------ */
 
-uint8_t *netbuf_data(const NetBuf *nb);
+const uint8_t *netbuf_data(const NetBuf *nb);
 size_t   netbuf_len(const NetBuf *nb);
 size_t   netbuf_headroom(const NetBuf *nb);
 size_t   netbuf_tailroom(const NetBuf *nb);

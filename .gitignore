@@ -10,7 +10,8 @@
 !ROADMAP.md
 !LICENSE
 !LICENSE.md
-!boot.asm
+!boot/
+!boot/**
 !build.js
 !package.json
 !package-lock.json

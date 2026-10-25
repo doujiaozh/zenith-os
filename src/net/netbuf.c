@@ -109,7 +109,7 @@ int netbuf_append(NetBuf *nb, const void *data, size_t n)
     return 0;
 }
 
-uint8_t *netbuf_data(const NetBuf *nb)
+const uint8_t *netbuf_data(const NetBuf *nb)
 {
     if (nb == NULL)
         return NULL;
