@@ -99,9 +99,12 @@ const GNU_DIRS = [
 ];
 
 function findGnu(tool) {
+  // POSIX hosts (the Linux CI: `gcc nasm binutils` via apt) carry binutils on
+  // PATH under the bare name, so probe that first; the Windows layouts below
+  // add the extension and the well-known mingw / msys / tdm directories.
   const cands = [process.env[tool.toUpperCase()]]
     .filter(Boolean)
-    .concat([tool + '.exe'], GNU_DIRS.map((d) => path.join(d, tool + '.exe')));
+    .concat([tool, tool + '.exe'], GNU_DIRS.map((d) => path.join(d, tool + '.exe')));
   for (const c of cands) {
     if (!path.isAbsolute(c)) {
       if (probe(c, '--version')) return c;
@@ -113,7 +116,7 @@ function findGnu(tool) {
 }
 
 /* C compiler discovery: prefer the repo-local TCC, fall back to a system
- * gcc/cc/clang that understands -m32 (Linux CI path, apt gcc-multilib).
+ * gcc/cc/clang that understands -m32 (Linux CI path, apt gcc + binutils).
  * gcc -m32 emits PE objects under mingw and ELF objects on Linux; the linker
  * stage below already handles both.
  * `node build.js --cc <bin>` overrides discovery (CI parity testing). */
@@ -378,7 +381,8 @@ function main() {
   ]);
   if (!NASM) fail('NASM not found ($NASM, nasm.exe next to build.js, or PATH).');
   // C compiler: TCC first (repo-local on Windows), then the system gcc/cc
-  // (Linux CI installs it via apt: gcc + gcc-multilib for -m32 + binutils).
+  // (Linux CI installs it via apt: gcc + nasm + binutils; -m32 objects are
+  // compile-only, so no multilib runtime files are ever linked in).
   // gcc -m32 objects are PE-on-mingw / ELF-on-linux, both fine for ld below.
   CC = findCC();
   if (!CC) fail('No C compiler: $TCC, tcc/tcc.exe, tcc, or gcc/cc with -m32.');

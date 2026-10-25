@@ -33,6 +33,12 @@ int ne2000_init(Ne2000 *d, uint16_t io) {
     /* CURR lives on page 1 (offset 7) */
     outb(io + NE_CR, NE_CR_STP | NE_CR_PAGE1);
     outb(io + NE_ISR + 0, NE_RING_START);      /* CURR = ring start */
+    /* v86 rolls a fresh random MAC into PAR0..PAR5 on every boot, which
+     * makes the NIC's address unverifiable from run to run; pin the classic
+     * QEMU user-net address so the boot log, the wire and the shell agree.
+     * Page-1 writes land in the chip's mac[] and read back verbatim. */
+    { static const uint8_t fixed[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+      for (i = 0; i < 6; i++) outb(io + NE_PSTART + (uint16_t)i, fixed[i]); }
     for (i = 0; i < 6; i++) d->mac[i] = inb(io + NE_PSTART + (uint16_t)i);
     outb(io + NE_CR, NE_CR_STP | NE_CR_PAGE0);
 

@@ -61,9 +61,15 @@
 #define NE_ISR_RDC    0x40
 #define NE_ISR_RST    0x80
 
-#define NE_RING_START 64      /* pages: 8 KiB Rx ring 64..96, Tx stage 96+   */
-#define NE_RING_STOP  96
-#define NE_TX_PAGE    96      /* v86 only lets remote writes reach 0x4000+    */
+/* Chip buffer-RAM layout (32 KiB = pages 0..127). The remote-DMA data port
+ * in the v86 ne2k model only accepts writes at RSAR <= 16 or in the
+ * 0x4000..0x8000 window, and it wraps RSAR back to PSTART as soon as it
+ * passes PSTOP -- so the Tx staging page must sit at 0x4000+ AND leave the
+ * whole frame below PSTOP, which is why the ring runs to 128 while the
+ * frame itself is staged at page 96. */
+#define NE_RING_START 64      /* Rx ring: 16 KiB, 64..128                   */
+#define NE_RING_STOP  128
+#define NE_TX_PAGE    96      /* Tx staging page (0x6000), below the wrap    */
 
 typedef struct {
     uint16_t io;
@@ -73,7 +79,8 @@ typedef struct {
 /* Reject grandfather ports: 0 and the classic IDE/PIC ranges are never a NIC. */
 int ne2000_probe(uint16_t io);
 
-/* Configure the ring, read the MAC, start the receiver. Returns 0/-1. */
+/* Configure the ring, pin the MAC (v86 randomizes PAR at boot, so the
+ * driver programs the QEMU user-net address), start the receiver. 0/-1. */
 int ne2000_init(Ne2000 *d, uint16_t io);
 
 /* Copy one frame into the Tx staging page and pulse TXP. 0/-1. */

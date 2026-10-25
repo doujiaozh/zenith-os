@@ -11,7 +11,9 @@
  *  help / clear / reboot / 3d / net.
  *
  *  Output goes to the VGA text layer on screen and is mirrored to COM1 so
- *  every shell session also exists as a plain serial log.
+ *  every shell session also exists as a plain serial log; the kernel log
+ *  itself (klog) is mirrored to the screen through the fmt sink registered
+ *  right after the console comes up.
  * ============================================================================
  */
 #include "zenith.h"
@@ -137,7 +139,7 @@ static void cmd_help(void) {
     term_puts("  help    show this list\n");
     term_puts("  clear   clear the screen\n");
     term_puts("  3d      rotating 3D neural grid (ESC returns here)\n");
-    term_puts("  net     rtl8139 ARP round trip (see serial log)\n");
+    term_puts("  net     network status + one ARP round trip\n");
     term_puts("  reboot  restart the machine\n");
 }
 
@@ -175,6 +177,16 @@ static void shell(void) {
     }
 }
 
+/* kprintf mirror: the formatter always lands on COM1; registering this sink
+ * also renders every klog line on the boot screen, so the PCI scan, the
+ * NIC's MAC address and the ARP exchange are visible on the VGA layer, not
+ * just in the serial capture. */
+static void term_klog_sink(char c) {
+    if (c == '\r') return;
+    if (c == '\n') { term_newline(); vga_swap(); return; }
+    term_char(c);
+}
+
 /* --- entry ---------------------------------------------------------------- */
 void kernel_main(BootInfo *info) {
     serial_init();
@@ -192,6 +204,7 @@ void kernel_main(BootInfo *info) {
 
     vga_init();
     term_clear();
+    fmt_set_sink(term_klog_sink);   /* klog now also paints the boot screen */
 
     /* memory bring-up: E820 -> 4 KiB PMM bitmap -> identity paging (16 MiB,
      * covers kernel/heap/bitmaps/VGA/stack) -> kernel heap.  The MMU flip

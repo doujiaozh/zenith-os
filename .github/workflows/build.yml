@@ -14,8 +14,7 @@ jobs:
 
     - name: Install dependencies (NASM, GCC, binutils)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y nasm build-essential gcc-multilib binutils
+        sudo apt-get update && sudo apt-get install -y gcc nasm binutils
 
     - name: Build OS
       run: node build.js

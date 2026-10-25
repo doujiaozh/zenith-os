@@ -25,8 +25,8 @@
 
 /* QEMU user-mode network constants: the guest sits at 10.0.2.15 and the
  * SLIRP backend answers ARP for the 10.0.2.2 gateway - that reply is the
- * cheapest full round-trip proof. tools/emulate.mjs plays the same role
- * for the v86 NE2000. */
+ * cheapest full round-trip proof. The v86 NE2000 has no such backend, so
+ * the exchange there proves the Tx path and times out cleanly. */
 #define NET_guest_IP  {10, 0, 2, 15}
 #define NET_gw_IP     {10, 0, 2, 2}
 #define NET_gw_MAC    {0x52, 0x54, 0x00, 0x12, 0x34, 0x56}
